@@ -208,16 +208,13 @@ def set_stepper(template_name: str, target: int, minimum: int, cfg: configparser
 
     log.info("stepper %s: reset to min via %d × '-' @%s", template_name, reset_n, minus_pt)
     _record_click(*minus_pt, f"{template_name}-")
-    for _ in range(reset_n):
-        pyautogui.click(*minus_pt)
-        time.sleep(0.05)
-    time.sleep(0.3)
+    pyautogui.click(minus_pt[0], minus_pt[1], clicks=reset_n, interval=0.1)
+    time.sleep(0.5)  # дать UI устаканиться после серии "-"
 
     log.info("stepper %s: increment %d × '+' @%s → target=%d", template_name, delta, plus_pt, target)
     _record_click(*plus_pt, f"{template_name}+")
-    for _ in range(delta):
-        pyautogui.click(*plus_pt)
-        time.sleep(0.08)
+    if delta > 0:
+        pyautogui.click(plus_pt[0], plus_pt[1], clicks=delta, interval=0.15)
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
