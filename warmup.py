@@ -43,7 +43,11 @@ if sys.platform == "win32":
 import cv2
 import numpy as np
 import pyautogui
-from PIL import ImageGrab
+from PIL import ImageDraw, ImageGrab
+
+# Помечает последние N точек клика на скриншоте, чтобы было видно куда летели курсоры.
+_CLICK_TRAIL: list[tuple[int, int, str]] = []
+_TRAIL_LIMIT = 6
 
 ROOT = Path(__file__).resolve().parent
 TEMPLATES_DIR = ROOT / "templates"
@@ -82,13 +86,28 @@ def load_config() -> configparser.ConfigParser:
     return cfg
 
 
+def _record_click(x: int, y: int, label: str) -> None:
+    _CLICK_TRAIL.append((x, y, label))
+    if len(_CLICK_TRAIL) > _TRAIL_LIMIT:
+        _CLICK_TRAIL.pop(0)
+
+
 def screenshot(step: str, enabled: bool) -> None:
     if not enabled:
         return
     SCREENSHOTS_DIR.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
     path = SCREENSHOTS_DIR / f"{ts}_{step}.png"
-    ImageGrab.grab().save(path)
+    img = ImageGrab.grab()
+    if _CLICK_TRAIL:
+        draw = ImageDraw.Draw(img)
+        r = 18
+        for x, y, label in _CLICK_TRAIL:
+            draw.ellipse([x - r, y - r, x + r, y + r], outline="red", width=3)
+            draw.line([(x - r, y), (x + r, y)], fill="red", width=2)
+            draw.line([(x, y - r), (x, y + r)], fill="red", width=2)
+            draw.text((x + r + 3, y - r), label, fill="red")
+    img.save(path)
     log.info("screenshot → %s", path.name)
 
 
@@ -134,6 +153,7 @@ def click(name: str, cfg: configparser.ConfigParser, *, double: bool = False) ->
     timeout = cfg.getfloat("matching", "wait_seconds")
     x, y = wait_for(name, conf, timeout)
     log.info("click %s@(%d,%d)%s", name, x, y, " ×2" if double else "")
+    _record_click(x, y, name)
     if double:
         pyautogui.doubleClick(x, y)
     else:
@@ -146,6 +166,7 @@ def click_at_offset(name: str, xf: float, yf: float, cfg: configparser.ConfigPar
     left, top, w, h = _find_template_box(name, cfg)
     x, y = int(left + w * xf), int(top + h * yf)
     log.info("click %s @offset(%.2f,%.2f) → (%d,%d)", name, xf, yf, x, y)
+    _record_click(x, y, name)
     pyautogui.click(x, y)
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
@@ -186,12 +207,14 @@ def set_stepper(template_name: str, target: int, minimum: int, cfg: configparser
     delta = max(0, target - minimum)
 
     log.info("stepper %s: reset to min via %d × '-' @%s", template_name, reset_n, minus_pt)
+    _record_click(*minus_pt, f"{template_name}-")
     for _ in range(reset_n):
         pyautogui.click(*minus_pt)
         time.sleep(0.05)
     time.sleep(0.3)
 
     log.info("stepper %s: increment %d × '+' @%s → target=%d", template_name, delta, plus_pt, target)
+    _record_click(*plus_pt, f"{template_name}+")
     for _ in range(delta):
         pyautogui.click(*plus_pt)
         time.sleep(0.08)
