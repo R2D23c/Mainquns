@@ -16,6 +16,7 @@ Linken Sphere 2 — автоматизация Warm up.
 from __future__ import annotations
 
 import configparser
+import ctypes
 import glob
 import logging
 import os
@@ -23,6 +24,21 @@ import random
 import sys
 import time
 from pathlib import Path
+
+# DPI awareness ОБЯЗАТЕЛЬНО до импорта pyautogui/Pillow.
+# Иначе на Windows со scaling != 100% ImageGrab отдаёт физические пиксели,
+# а pyautogui.click трактует их как логические — клики уходят не туда.
+if sys.platform == "win32":
+    for _setter in (
+        lambda: ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)),
+        lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2),
+        lambda: ctypes.windll.user32.SetProcessDPIAware(),
+    ):
+        try:
+            _setter()
+            break
+        except (AttributeError, OSError):
+            continue
 
 import cv2
 import numpy as np
