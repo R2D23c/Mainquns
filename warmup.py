@@ -254,7 +254,7 @@ def remove_first_lines_from_list(n: int, cfg: configparser.ConfigParser) -> None
 def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     """
     Если главный экран Linken Sphere 2 (по three_dots.png) уже виден — ничего не делаем.
-    Иначе запускаем ярлык из config и ждём появления главного экрана.
+    Иначе убиваем старые процессы, запускаем exe заново и ждём главного экрана.
     """
     conf = cfg.getfloat("matching", "confidence")
     quick_timeout = 3.0
@@ -272,12 +272,24 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
             "поправь startup.linken_sphere_path в config.ini"
         )
 
-    log.info("Linken Sphere 2 не открыт, запускаю: %s", path)
-    if path.lower().endswith(".lnk"):
-        # ярлык — открываем через ассоциацию по умолчанию
+    exe_name = os.path.basename(path)  # "Linken Sphere 2.exe"
+    log.info("завершаю старые процессы %s (если есть)…", exe_name)
+    subprocess.run(
+        ["taskkill", "/f", "/im", exe_name, "/t"],
+        capture_output=True,
+    )
+    time.sleep(2.0)
+
+    log.info("запускаю Linken Sphere 2: %s", path)
+    try:
         os.startfile(path)
-    else:
-        subprocess.Popen([path], close_fds=True)
+        log.info("os.startfile успешен")
+    except Exception as exc:
+        log.warning("os.startfile не сработал (%s), пробую shell=True", exc)
+        subprocess.Popen(f'"{path}"', shell=True)
+
+    log.info("жду инициализацию Electron (10s)…")
+    time.sleep(10.0)
 
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
     log.info("жду главный экран (до %.0fs)…", timeout)
