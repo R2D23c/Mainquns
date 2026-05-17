@@ -125,17 +125,51 @@ def click(name: str, cfg: configparser.ConfigParser, *, double: bool = False) ->
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
-def set_numeric_field(template_name: str, value: int, cfg: configparser.ConfigParser) -> None:
-    """Кликает по полю, чистит и вводит новое значение."""
+def _find_template_box(name: str, cfg: configparser.ConfigParser) -> tuple[int, int, int, int]:
+    """Возвращает (left, top, width, height) найденного шаблона."""
     conf = cfg.getfloat("matching", "confidence")
     timeout = cfg.getfloat("matching", "wait_seconds")
-    x, y = wait_for(template_name, conf, timeout)
-    log.info("set field %s=%d at (%d,%d)", template_name, value, x, y)
-    pyautogui.tripleClick(x, y)
-    time.sleep(0.2)
-    pyautogui.press("delete")
-    time.sleep(0.1)
-    pyautogui.typewrite(str(value), interval=0.05)
+    tpl_path = TEMPLATES_DIR / f"{name}.png"
+    tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
+    if tpl is None:
+        raise FileNotFoundError(f"шаблон {tpl_path} не читается")
+    h, w = tpl.shape[:2]
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        res = cv2.matchTemplate(grab_screen_bgr(), tpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if max_val >= conf:
+            log.info("match %s: confidence=%.3f", name, max_val)
+            return (max_loc[0], max_loc[1], w, h)
+        time.sleep(0.5)
+    raise TimeoutError(f"элемент '{name}' не появился за {timeout}s")
+
+
+def set_stepper(template_name: str, target: int, minimum: int, cfg: configparser.ConfigParser) -> None:
+    """
+    Stepper-поле: сначала кликаем '-' много раз (сброс к минимуму),
+    затем '+' нужное число раз. Координаты +/- относительно box'а шаблона.
+    """
+    left, top, w, h = _find_template_box(template_name, cfg)
+    plus_xf = cfg.getfloat("stepper_offsets", "plus_x")
+    minus_xf = cfg.getfloat("stepper_offsets", "minus_x")
+    yf = cfg.getfloat("stepper_offsets", "y_center")
+    plus_pt = (int(left + w * plus_xf), int(top + h * yf))
+    minus_pt = (int(left + w * minus_xf), int(top + h * yf))
+    reset_n = cfg.getint("warmup", "reset_clicks")
+    delta = max(0, target - minimum)
+
+    log.info("stepper %s: reset to min via %d × '-' @%s", template_name, reset_n, minus_pt)
+    for _ in range(reset_n):
+        pyautogui.click(*minus_pt)
+        time.sleep(0.05)
+    time.sleep(0.3)
+
+    log.info("stepper %s: increment %d × '+' @%s → target=%d", template_name, delta, plus_pt, target)
+    for _ in range(delta):
+        pyautogui.click(*plus_pt)
+        time.sleep(0.08)
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
@@ -187,18 +221,20 @@ def run() -> int:
         click("warm_up_menu", cfg)
         screenshot("02_warmup_window", shots)
 
-        # 3. viewing depth
-        set_numeric_field(
+        # 3. viewing depth (stepper)
+        set_stepper(
             "viewing_depth_field",
             cfg.getint("warmup", "viewing_depth"),
+            cfg.getint("warmup", "viewing_depth_min"),
             cfg,
         )
         screenshot("03_viewing_depth_set", shots)
 
-        # 4. time per url
-        set_numeric_field(
+        # 4. time per url (stepper)
+        set_stepper(
             "time_per_url_field",
             cfg.getint("warmup", "time_per_url"),
+            cfg.getint("warmup", "time_per_url_min"),
             cfg,
         )
         screenshot("04_time_per_url_set", shots)
