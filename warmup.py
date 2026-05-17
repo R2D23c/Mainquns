@@ -125,6 +125,15 @@ def click(name: str, cfg: configparser.ConfigParser, *, double: bool = False) ->
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
+def click_at_offset(name: str, xf: float, yf: float, cfg: configparser.ConfigParser) -> None:
+    """Кликает в точку (xf, yf) внутри найденного шаблона, доли 0..1 от ширины/высоты."""
+    left, top, w, h = _find_template_box(name, cfg)
+    x, y = int(left + w * xf), int(top + h * yf)
+    log.info("click %s @offset(%.2f,%.2f) → (%d,%d)", name, xf, yf, x, y)
+    pyautogui.click(x, y)
+    time.sleep(cfg.getfloat("matching", "step_delay"))
+
+
 def _find_template_box(name: str, cfg: configparser.ConfigParser) -> tuple[int, int, int, int]:
     """Возвращает (left, top, width, height) найденного шаблона."""
     conf = cfg.getfloat("matching", "confidence")
@@ -239,9 +248,14 @@ def run() -> int:
         )
         screenshot("04_time_per_url_set", shots)
 
-        # 5. снять галку
+        # 5. снять галку — toggle слева в шаблоне, не по центру
         if cfg.getboolean("warmup", "uncheck_use_most_popular"):
-            click("use_most_popular_checkbox", cfg)
+            click_at_offset(
+                "use_most_popular_checkbox",
+                cfg.getfloat("checkbox_offset", "toggle_x"),
+                cfg.getfloat("checkbox_offset", "toggle_y"),
+                cfg,
+            )
             screenshot("05_unchecked", shots)
 
         # 6. Browse file → диалог → ввести путь → Enter
