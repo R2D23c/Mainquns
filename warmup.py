@@ -2,12 +2,12 @@
 Linken Sphere 2 — автоматизация Warm up.
 
 Сценарий:
-  1. Найти и активировать окно Linken Sphere 2.
-  2. Кликнуть кнопку "три точки" → пункт "Warm up".
-  3. Изменить viewing depth и time per url на значения из config.ini.
-  4. Снять галочку "use most popular".
-  5. Browse file → выбрать случайный .txt из указанной папки.
-  6. Нажать START.
+  0. Запустить Linken Sphere 2 если ещё не открыт, дождаться главного экрана.
+  1. Кликнуть кнопку "три точки" → пункт "Warm up".
+  2. Изменить viewing depth и time per url на значения из config.ini.
+  3. Снять галочку "use most popular".
+  4. Browse file → выбрать случайный .txt из указанной папки.
+  5. Нажать START.
 
 Поиск элементов — по template matching (картинки в templates/).
 Диалог открытия файла — нативный Windows, обрабатывается через клавиатуру.
@@ -21,6 +21,7 @@ import glob
 import logging
 import os
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -218,6 +219,41 @@ def set_stepper(template_name: str, target: int, minimum: int, cfg: configparser
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
+def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
+    """
+    Если главный экран Linken Sphere 2 (по three_dots.png) уже виден — ничего не делаем.
+    Иначе запускаем ярлык из config и ждём появления главного экрана.
+    """
+    conf = cfg.getfloat("matching", "confidence")
+    quick_timeout = 3.0
+    try:
+        wait_for("three_dots", conf, quick_timeout)
+        log.info("Linken Sphere 2 уже на главном экране")
+        return
+    except TimeoutError:
+        pass
+
+    path = cfg.get("startup", "linken_sphere_path")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"не найден путь к Linken Sphere 2: {path}. "
+            "поправь startup.linken_sphere_path в config.ini"
+        )
+
+    log.info("Linken Sphere 2 не открыт, запускаю: %s", path)
+    if path.lower().endswith(".lnk"):
+        # ярлык — открываем через ассоциацию по умолчанию
+        os.startfile(path)
+    else:
+        subprocess.Popen([path], close_fds=True)
+
+    timeout = cfg.getfloat("startup", "launch_wait_seconds")
+    log.info("жду главный экран (до %.0fs)…", timeout)
+    wait_for("three_dots", conf, timeout)
+    log.info("главный экран готов")
+    time.sleep(1.0)
+
+
 def pick_random_file(cfg: configparser.ConfigParser) -> str:
     files_dir = cfg.get("paths", "files_dir")
     pattern = cfg.get("paths", "file_glob")
@@ -255,6 +291,9 @@ def run() -> int:
 
     try:
         file_to_attach = pick_random_file(cfg)
+
+        # 0. Запустить Linken Sphere 2, если ещё не запущен
+        ensure_linken_sphere_running(cfg)
 
         screenshot("00_initial", shots)
 
