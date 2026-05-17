@@ -7,7 +7,8 @@ Linken Sphere 2 — автоматизация Warm up.
   2. Изменить viewing depth и time per url на значения из config.ini.
   3. Снять галочку "use most popular".
   4. Browse file → выбрать случайный .txt из указанной папки.
-  5. Нажать START.
+  5. Удалить первые N строк из URL-textarea (опционально).
+  6. Нажать START.
 
 Поиск элементов — по template matching (картинки в templates/).
 Диалог открытия файла — нативный Windows, обрабатывается через клавиатуру.
@@ -219,6 +220,37 @@ def set_stepper(template_name: str, target: int, minimum: int, cfg: configparser
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
+def remove_first_lines_from_list(n: int, cfg: configparser.ConfigParser) -> None:
+    """
+    Удаляет первые n строк из URL-textarea в окне Warm up.
+    Якоримся на browse_file_button, кликаем со сдвигом внутрь списка,
+    Ctrl+Home → Shift+Down × n → Delete.
+    """
+    if n <= 0:
+        return
+    left, top, w, h = _find_template_box("browse_file_button", cfg)
+    bx = left + w // 2
+    by = top + h // 2
+    dx = cfg.getint("url_list_offset", "dx_from_browse")
+    dy = cfg.getint("url_list_offset", "dy_from_browse")
+    click_x, click_y = bx + dx, by + dy
+
+    log.info("removing first %d lines: click URL list @(%d,%d)", n, click_x, click_y)
+    _record_click(click_x, click_y, "url_list")
+    pyautogui.click(click_x, click_y)
+    time.sleep(0.3)
+    pyautogui.hotkey("ctrl", "home")
+    time.sleep(0.15)
+    pyautogui.keyDown("shift")
+    for _ in range(n):
+        pyautogui.press("down")
+        time.sleep(0.04)
+    pyautogui.keyUp("shift")
+    time.sleep(0.15)
+    pyautogui.press("delete")
+    time.sleep(cfg.getfloat("matching", "step_delay"))
+
+
 def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     """
     Если главный экран Linken Sphere 2 (по three_dots.png) уже виден — ничего не делаем.
@@ -337,6 +369,12 @@ def run() -> int:
         click("browse_file_button", cfg)
         handle_open_file_dialog(file_to_attach, cfg)
         screenshot("07_after_browse", shots)
+
+        # 6.5. Удалить первые N строк из URL-списка (если задано)
+        remove_n = cfg.getint("warmup", "remove_first_n_lines", fallback=0)
+        if remove_n > 0:
+            remove_first_lines_from_list(remove_n, cfg)
+            screenshot("07b_lines_removed", shots)
 
         # 7. START
         click("start_button", cfg)
