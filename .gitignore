@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 venv/
 .python_cmd
+credentials.ini
