@@ -254,7 +254,7 @@ def remove_first_lines_from_list(n: int, cfg: configparser.ConfigParser) -> None
 def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     """
     Если главный экран Linken Sphere 2 (по three_dots.png) уже виден — ничего не делаем.
-    Иначе убиваем старые процессы, запускаем exe заново и ждём главного экрана.
+    Иначе мягко завершаем старые процессы, запускаем через ShellExecuteW и ждём.
     """
     conf = cfg.getfloat("matching", "confidence")
     quick_timeout = 3.0
@@ -272,24 +272,34 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
             "поправь startup.linken_sphere_path в config.ini"
         )
 
-    exe_name = os.path.basename(path)  # "Linken Sphere 2.exe"
-    log.info("завершаю старые процессы %s (если есть)…", exe_name)
-    subprocess.run(
-        ["taskkill", "/f", "/im", exe_name, "/t"],
-        capture_output=True,
-    )
-    time.sleep(2.0)
+    exe_name = os.path.basename(path)
 
-    log.info("запускаю Linken Sphere 2: %s", path)
-    try:
-        os.startfile(path)
-        log.info("os.startfile успешен")
-    except Exception as exc:
-        log.warning("os.startfile не сработал (%s), пробую shell=True", exc)
-        subprocess.Popen(f'"{path}"', shell=True)
+    # Мягкое закрытие (WM_CLOSE)
+    r = subprocess.run(["taskkill", "/im", exe_name], capture_output=True, text=True)
+    log.info("taskkill soft: stdout=%r stderr=%r", r.stdout.strip(), r.stderr.strip())
+    time.sleep(3.0)
 
-    log.info("жду инициализацию Electron (10s)…")
-    time.sleep(10.0)
+    # Принудительное завершение остатков
+    r = subprocess.run(["taskkill", "/f", "/im", exe_name, "/t"], capture_output=True, text=True)
+    log.info("taskkill force: stdout=%r stderr=%r", r.stdout.strip(), r.stderr.strip())
+    time.sleep(3.0)
+
+    exe_dir = os.path.dirname(path)
+    log.info("запускаю через ShellExecuteW: %s (cwd=%s)", path, exe_dir)
+
+    # ShellExecuteW = точно как двойной клик в Проводнике
+    ret = ctypes.windll.shell32.ShellExecuteW(None, "open", path, None, exe_dir, 1)
+    log.info("ShellExecuteW → %d (%s)", ret, "OK" if ret > 32 else "ОШИБКА")
+    if ret <= 32:
+        log.warning("ShellExecuteW вернул ошибку %d, запускаю через Popen", ret)
+        subprocess.Popen(
+            [path],
+            cwd=exe_dir,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+
+    log.info("жду инициализацию Electron (15s)…")
+    time.sleep(15.0)
 
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
     log.info("жду главный экран (до %.0fs)…", timeout)
