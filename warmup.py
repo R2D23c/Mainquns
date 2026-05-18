@@ -22,6 +22,7 @@ import glob
 import logging
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -455,12 +456,83 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     time.sleep(1.0)
 
 
+def _done_dir(cfg: configparser.ConfigParser) -> str:
+    return os.path.join(cfg.get("paths", "files_dir"), "done")
+
+
+def archive_used_file(src_path: str, cfg: configparser.ConfigParser) -> None:
+    """Переносит отработанный файл в done/<timestamp>_<имя>."""
+    done_dir = _done_dir(cfg)
+    os.makedirs(done_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dst = os.path.join(done_dir, f"{ts}_{os.path.basename(src_path)}")
+    try:
+        shutil.move(src_path, dst)
+        log.info("файл перенесён в done: %s", dst)
+    except OSError as e:
+        log.warning("не удалось перенести %s в done: %s", src_path, e)
+
+
+def regenerate_files_from_done(cfg: configparser.ConfigParser) -> int:
+    """
+    Если files_dir пуст — берёт все URL'ы из done/, перемешивает,
+    режет на куски по lines_per_file и кладёт обратно как новые файлы.
+    Возвращает число созданных файлов.
+    """
+    files_dir = cfg.get("paths", "files_dir")
+    done_dir = _done_dir(cfg)
+    pattern = cfg.get("paths", "file_glob")
+    lines_per_file = cfg.getint("paths", "regenerate_lines_per_file", fallback=100)
+
+    if not os.path.isdir(done_dir):
+        return 0
+
+    done_files = glob.glob(os.path.join(done_dir, pattern))
+    all_urls: list[str] = []
+    for src in done_files:
+        try:
+            with open(src, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        all_urls.append(line)
+        except OSError as e:
+            log.warning("не удалось прочитать %s: %s", src, e)
+
+    if not all_urls:
+        return 0
+
+    random.shuffle(all_urls)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    created = 0
+    for i in range(0, len(all_urls), lines_per_file):
+        chunk = all_urls[i:i + lines_per_file]
+        out_path = os.path.join(files_dir, f"regen_{ts}_{created:04d}.txt")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(chunk) + "\n")
+        created += 1
+
+    log.info(
+        "regenerate: %d URL'ов из %d файлов done/ → %d новых файлов по ~%d строк",
+        len(all_urls), len(done_files), created, lines_per_file,
+    )
+    return created
+
+
 def pick_random_file(cfg: configparser.ConfigParser) -> str:
     files_dir = cfg.get("paths", "files_dir")
     pattern = cfg.get("paths", "file_glob")
     candidates = glob.glob(os.path.join(files_dir, pattern))
+
     if not candidates:
-        raise FileNotFoundError(f"в {files_dir} нет файлов по маске {pattern}")
+        log.info("files_dir пуст — пробую регенерировать из done/")
+        if regenerate_files_from_done(cfg) > 0:
+            candidates = glob.glob(os.path.join(files_dir, pattern))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"в {files_dir} нет файлов по маске {pattern} (done/ тоже пуст)"
+        )
     chosen = random.choice(candidates)
     log.info("случайный файл (%d кандидатов): %s", len(candidates), chosen)
     return chosen
@@ -551,6 +623,9 @@ def run() -> int:
         # 7. START
         click("start_button", cfg)
         screenshot("08_started", shots)
+
+        # 8. отработанный файл — в done/
+        archive_used_file(file_to_attach, cfg)
 
         log.info("сценарий завершён успешно")
         return 0
