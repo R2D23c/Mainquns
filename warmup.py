@@ -251,9 +251,113 @@ def remove_first_lines_from_list(n: int, cfg: configparser.ConfigParser) -> None
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
+def load_credentials() -> configparser.ConfigParser:
+    """Читает credentials.ini рядом со скриптом."""
+    creds = configparser.ConfigParser()
+    path = ROOT / "credentials.ini"
+    if not path.exists():
+        raise FileNotFoundError(
+            "credentials.ini не найден. "
+            "Скопируй credentials.ini.example в credentials.ini и заполни данные."
+        )
+    creds.read(path, encoding="utf-8")
+    return creds
+
+
+def _type_via_clipboard(text: str) -> None:
+    """Вставляет текст через буфер обмена Windows (работает с @, !, # и спецсимволами)."""
+    if sys.platform != "win32":
+        pyautogui.typewrite(text, interval=0.03)
+        return
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    k32 = ctypes.windll.kernel32
+    u32 = ctypes.windll.user32
+    u32.OpenClipboard(None)
+    u32.EmptyClipboard()
+    hMem = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    pMem = k32.GlobalLock(hMem)
+    ctypes.memmove(pMem, data, len(data))
+    k32.GlobalUnlock(hMem)
+    u32.SetClipboardData(CF_UNICODETEXT, hMem)
+    u32.CloseClipboard()
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.2)
+
+
+def login_if_needed(cfg: configparser.ConfigParser) -> None:
+    """Если видна форма аутентификации — входим по данным из credentials.ini."""
+    conf = cfg.getfloat("matching", "confidence")
+
+    if find_template("three_dots", conf) is not None:
+        log.info("login_if_needed: уже на главном экране")
+        return
+
+    if sys.platform != "win32":
+        return
+
+    hwnd = ctypes.windll.user32.FindWindowW(None, "Authentication")
+    if not hwnd:
+        log.info("login_if_needed: окно Authentication не найдено")
+        return
+
+    log.info("login_if_needed: обнаружен экран входа (hwnd=%d)", hwnd)
+    screenshot("login_screen", cfg.getboolean("logging", "screenshots"))
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    rect = _RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    win_w = rect.right - rect.left
+    win_h = rect.bottom - rect.top
+    cx = rect.left + win_w // 2
+
+    # Пропорции замерены по скриншоту: Email=43%, Password=52%, SIGN IN=68% от высоты
+    email_y    = rect.top + int(win_h * 0.434)
+    password_y = rect.top + int(win_h * 0.521)
+    signin_y   = rect.top + int(win_h * 0.678)
+
+    log.info("окно %dx%d @ (%d,%d)", win_w, win_h, rect.left, rect.top)
+    log.info("email=(%d,%d) password=(%d,%d) signin=(%d,%d)",
+             cx, email_y, cx, password_y, cx, signin_y)
+
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.5)
+
+    creds = load_credentials()
+
+    _record_click(cx, email_y, "email")
+    pyautogui.click(cx, email_y)
+    time.sleep(0.3)
+    pyautogui.hotkey("ctrl", "a")
+    _type_via_clipboard(creds.get("account", "email"))
+
+    _record_click(cx, password_y, "password")
+    pyautogui.click(cx, password_y)
+    time.sleep(0.3)
+    pyautogui.hotkey("ctrl", "a")
+    _type_via_clipboard(creds.get("account", "password"))
+
+    screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
+
+    _record_click(cx, signin_y, "sign_in")
+    pyautogui.click(cx, signin_y)
+    log.info("нажат SIGN IN, жду главный экран…")
+    time.sleep(3.0)
+
+    timeout = cfg.getfloat("startup", "launch_wait_seconds")
+    wait_for("three_dots", conf, timeout)
+    log.info("вход выполнен, главный экран готов")
+    time.sleep(1.0)
+
+
 def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     """
     Если главный экран Linken Sphere 2 (по three_dots.png) уже виден — ничего не делаем.
+    Если уже на экране входа — тоже не перезапускаем (login_if_needed сделает вход).
     Иначе мягко завершаем старые процессы, запускаем через ShellExecuteW и ждём.
     """
     conf = cfg.getfloat("matching", "confidence")
@@ -264,6 +368,11 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
         return
     except TimeoutError:
         pass
+
+    # Уже показывает экран входа — не убиваем, просто дадим login_if_needed войти
+    if sys.platform == "win32" and ctypes.windll.user32.FindWindowW(None, "Authentication"):
+        log.info("Linken Sphere 2 уже запущен (экран входа), не перезапускаем")
+        return
 
     path = cfg.get("startup", "linken_sphere_path")
     if not os.path.exists(path):
@@ -302,9 +411,20 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     time.sleep(15.0)
 
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
-    log.info("жду главный экран (до %.0fs)…", timeout)
-    wait_for("three_dots", conf, timeout)
-    log.info("главный экран готов")
+    log.info("жду главный экран или экран входа (до %.0fs)…", timeout)
+    deadline_ls = time.time() + timeout
+    found_screen = None
+    while time.time() < deadline_ls:
+        if find_template("three_dots", conf) is not None:
+            found_screen = "main"
+            break
+        if sys.platform == "win32" and ctypes.windll.user32.FindWindowW(None, "Authentication"):
+            found_screen = "login"
+            break
+        time.sleep(0.5)
+    if found_screen is None:
+        raise TimeoutError("Linken Sphere не показал экран за отведённое время")
+    log.info("Linken Sphere готов (экран: %s)", found_screen)
     time.sleep(1.0)
 
 
@@ -348,6 +468,9 @@ def run() -> int:
 
         # 0. Запустить Linken Sphere 2, если ещё не запущен
         ensure_linken_sphere_running(cfg)
+
+        # 0.5 Войти, если показан экран аутентификации
+        login_if_needed(cfg)
 
         screenshot("00_initial", shots)
 
