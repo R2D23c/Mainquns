@@ -45,7 +45,25 @@ if errorlevel 1 goto install_failed
 echo %PY%> "%~dp0.python_cmd"
 echo.
 echo [OK] зависимости установлены через %PY%.
-echo интерпретатор записан в .python_cmd
+
+REM --- credentials.ini ---
+if not exist "%~dp0credentials.ini" (
+    copy "%~dp0credentials.ini.example" "%~dp0credentials.ini" >nul
+    echo.
+    echo [!] Создан credentials.ini — впиши свои email и пароль от Linken Sphere 2.
+    notepad "%~dp0credentials.ini"
+) else (
+    echo [OK] credentials.ini уже существует.
+)
+
+REM --- config.ini ---
+echo.
+echo Проверь пути в config.ini (папка с .txt файлами и путь к Linken Sphere 2):
+notepad "%~dp0config.ini"
+
+echo.
+echo Установка завершена.
+echo Для запуска по расписанию (раз в час) запусти schedule_hourly.bat от имени администратора.
 pause
 exit /b 0
 
