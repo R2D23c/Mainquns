@@ -286,6 +286,34 @@ def _type_via_clipboard(text: str) -> None:
     time.sleep(0.2)
 
 
+def _find_auth_window() -> int:
+    """Ищет окно Linken Sphere 2 с формой входа через EnumWindows (нечувствительно к регистру)."""
+    import ctypes.wintypes
+
+    found_hwnd = ctypes.c_size_t(0)
+    all_titles: list[str] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        title = buf.value
+        if not title:
+            return True
+        all_titles.append(title)
+        tl = title.lower()
+        if "authentication" in tl or ("linken" in tl and "sphere" in tl):
+            found_hwnd.value = hwnd
+            return False
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    log.info("видимые окна: %s", all_titles)
+    return found_hwnd.value
+
+
 def login_if_needed(cfg: configparser.ConfigParser) -> None:
     """Если видна форма аутентификации — входим по данным из credentials.ini."""
     conf = cfg.getfloat("matching", "confidence")
@@ -297,9 +325,9 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     if sys.platform != "win32":
         return
 
-    hwnd = ctypes.windll.user32.FindWindowW(None, "Authentication")
+    hwnd = _find_auth_window()
     if not hwnd:
-        log.info("login_if_needed: окно Authentication не найдено")
+        log.info("login_if_needed: окно аутентификации не найдено — пропуск")
         return
 
     log.info("login_if_needed: обнаружен экран входа (hwnd=%d)", hwnd)
@@ -370,7 +398,7 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
         pass
 
     # Уже показывает экран входа — не убиваем, просто дадим login_if_needed войти
-    if sys.platform == "win32" and ctypes.windll.user32.FindWindowW(None, "Authentication"):
+    if sys.platform == "win32" and _find_auth_window():
         log.info("Linken Sphere 2 уже запущен (экран входа), не перезапускаем")
         return
 
@@ -418,7 +446,7 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
         if find_template("three_dots", conf) is not None:
             found_screen = "main"
             break
-        if sys.platform == "win32" and ctypes.windll.user32.FindWindowW(None, "Authentication"):
+        if sys.platform == "win32" and _find_auth_window():
             found_screen = "login"
             break
         time.sleep(0.5)
