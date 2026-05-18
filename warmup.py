@@ -265,23 +265,22 @@ def load_credentials() -> configparser.ConfigParser:
 
 
 def _type_via_clipboard(text: str) -> None:
-    """Вставляет текст через буфер обмена Windows (работает с @, !, # и спецсимволами)."""
+    """Вставляет текст через буфер обмена (работает с @, ! и любыми Unicode символами)."""
     if sys.platform != "win32":
         pyautogui.typewrite(text, interval=0.03)
         return
-    CF_UNICODETEXT = 13
-    GMEM_MOVEABLE = 0x0002
-    data = text.encode("utf-16-le") + b"\x00\x00"
-    k32 = ctypes.windll.kernel32
-    u32 = ctypes.windll.user32
-    u32.OpenClipboard(None)
-    u32.EmptyClipboard()
-    hMem = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-    pMem = k32.GlobalLock(hMem)
-    ctypes.memmove(pMem, data, len(data))
-    k32.GlobalUnlock(hMem)
-    u32.SetClipboardData(CF_UNICODETEXT, hMem)
-    u32.CloseClipboard()
+    import base64
+    b64 = base64.b64encode(text.encode("utf-8")).decode()
+    ps_cmd = (
+        "Set-Clipboard "
+        "([System.Text.Encoding]::UTF8.GetString("
+        f"[System.Convert]::FromBase64String('{b64}')))"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+        capture_output=True,
+        timeout=10,
+    )
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.2)
 
