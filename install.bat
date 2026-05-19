@@ -46,6 +46,42 @@ echo %PY%> "%~dp0.python_cmd"
 echo.
 echo [OK] зависимости установлены через %PY%.
 
+REM --- Linken Sphere 2 ---
+set "LS_PATH=C:\Program Files (x86)\Linken Sphere 2\Linken Sphere 2.exe"
+if exist "%LS_PATH%" (
+    echo [OK] Linken Sphere 2 уже установлен.
+    goto :after_ls
+)
+
+echo.
+echo Linken Sphere 2 не найден, скачиваю установщик (~150 MB)...
+set "LS_INSTALLER=%TEMP%\LinkenSphere2Setup.exe"
+powershell -NoProfile -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://cdn.ls.app/Linken%%20Sphere%%202%%20Setup.exe' -OutFile '%LS_INSTALLER%' -UseBasicParsing"
+if errorlevel 1 (
+    echo [ERROR] Не удалось скачать Linken Sphere 2.
+    pause
+    exit /b 1
+)
+
+echo Запускаю установщик в тихом режиме...
+start /wait "" "%LS_INSTALLER%" /S
+
+echo Жду появления .exe (до 90 секунд)...
+set /a "WAITED=0"
+:wait_install
+if exist "%LS_PATH%" goto :install_done
+timeout /t 3 /nobreak >nul
+set /a "WAITED+=3"
+if %WAITED% LSS 90 goto :wait_install
+echo [WARN] За 90 секунд установка не завершилась.
+echo Запусти установщик вручную: %LS_INSTALLER%
+echo или впиши свой путь в config.ini -^> startup.linken_sphere_path
+goto :after_ls
+:install_done
+echo [OK] Linken Sphere 2 установлен в "%LS_PATH%"
+del /q "%LS_INSTALLER%" 2>nul
+:after_ls
+
 REM --- credentials.ini ---
 if not exist "%~dp0credentials.ini" (
     copy "%~dp0credentials.ini.example" "%~dp0credentials.ini" >nul
