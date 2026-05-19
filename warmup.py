@@ -456,8 +456,16 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     time.sleep(1.0)
 
 
+def _files_dir(cfg: configparser.ConfigParser) -> str:
+    """Резолвит paths.files_dir: абсолютный путь возвращает как есть, относительный — относительно ROOT."""
+    p = cfg.get("paths", "files_dir")
+    if not os.path.isabs(p):
+        p = str(ROOT / p)
+    return p
+
+
 def _done_dir(cfg: configparser.ConfigParser) -> str:
-    return os.path.join(cfg.get("paths", "files_dir"), "done")
+    return os.path.join(_files_dir(cfg), "done")
 
 
 def archive_used_file(src_path: str, cfg: configparser.ConfigParser) -> None:
@@ -479,7 +487,7 @@ def regenerate_files_from_done(cfg: configparser.ConfigParser) -> int:
     режет на куски по lines_per_file и кладёт обратно как новые файлы.
     Возвращает число созданных файлов.
     """
-    files_dir = cfg.get("paths", "files_dir")
+    files_dir = _files_dir(cfg)
     done_dir = _done_dir(cfg)
     pattern = cfg.get("paths", "file_glob")
     lines_per_file = cfg.getint("paths", "regenerate_lines_per_file", fallback=100)
@@ -520,7 +528,7 @@ def regenerate_files_from_done(cfg: configparser.ConfigParser) -> int:
 
 
 def pick_random_file(cfg: configparser.ConfigParser) -> str:
-    files_dir = cfg.get("paths", "files_dir")
+    files_dir = _files_dir(cfg)
     pattern = cfg.get("paths", "file_glob")
     candidates = glob.glob(os.path.join(files_dir, pattern))
 
