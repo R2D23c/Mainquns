@@ -287,10 +287,11 @@ def _type_via_clipboard(text: str) -> None:
 
 
 def _find_auth_window() -> int:
-    """Ищет окно Linken Sphere 2 с формой входа через EnumWindows (нечувствительно к регистру)."""
+    """Ищет окно Linken Sphere 2 с формой входа. Разворачивает если свёрнуто.
+    Пропускает мелкие/служебные окна Electron с тем же заголовком."""
     import ctypes.wintypes
 
-    found_hwnd = ctypes.c_size_t(0)
+    candidates: list[int] = []
     all_titles: list[str] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
@@ -305,13 +306,37 @@ def _find_auth_window() -> int:
         all_titles.append(title)
         tl = title.lower()
         if "authentication" in tl or ("linken" in tl and "sphere" in tl):
-            found_hwnd.value = hwnd
-            return False
+            candidates.append(hwnd)
         return True
 
     ctypes.windll.user32.EnumWindows(_cb, 0)
     log.info("видимые окна: %s", all_titles)
-    return found_hwnd.value
+    log.info("кандидатов на окно входа: %d", len(candidates))
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    SW_RESTORE = 9
+    for hwnd in candidates:
+        if ctypes.windll.user32.IsIconic(hwnd):
+            log.info("hwnd=%d свёрнуто, разворачиваю", hwnd)
+            ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+            time.sleep(0.6)
+
+        rect = _RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        log.info("hwnd=%d %dx%d @ (%d,%d)", hwnd, w, h, rect.left, rect.top)
+
+        # Окно формы логина должно быть крупным и на экране
+        if w >= 600 and h >= 400 and rect.left > -1000 and rect.top > -1000:
+            return hwnd
+
+    if candidates:
+        log.warning("найдены окна Linken Sphere, но ни одно не похоже на форму входа (мелкие/за экраном)")
+    return 0
 
 
 def login_if_needed(cfg: configparser.ConfigParser) -> None:
@@ -342,6 +367,11 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     win_w = rect.right - rect.left
     win_h = rect.bottom - rect.top
     cx = rect.left + win_w // 2
+
+    if win_w < 600 or win_h < 400 or rect.left < -1000 or rect.top < -1000:
+        log.error("окно %dx%d @ (%d,%d) — невалидное (за экраном/мелкое), отменяю логин",
+                  win_w, win_h, rect.left, rect.top)
+        return
 
     # Пропорции замерены по скриншоту: Email=43%, Password=52%, SIGN IN=68% от высоты
     email_y    = rect.top + int(win_h * 0.434)
