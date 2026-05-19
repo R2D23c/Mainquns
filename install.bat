@@ -65,8 +65,9 @@ if errorlevel 1 (
 )
 
 echo Запускаю установщик в тихом режиме...
-REM electron-builder NSIS: /S = silent, /allusers = ставить для всех (нужны права админа)
-start /wait "" "%LS_INSTALLER%" /S /allusers
+REM Inno Setup: /VERYSILENT = без UI, /SUPPRESSMSGBOXES = автопринятие EULA,
+REM /NORESTART = не перезагружать систему. Установка для всех (нужны права админа).
+start /wait "" "%LS_INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 
 echo Жду появления .exe (до 90 секунд)...
 set /a "WAITED=0"
