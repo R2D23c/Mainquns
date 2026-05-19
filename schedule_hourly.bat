@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM Регистрирует задачу в Windows Task Scheduler: запуск warmup.py каждый час.
 REM Запускать ОТ ИМЕНИ АДМИНИСТРАТОРА.
 

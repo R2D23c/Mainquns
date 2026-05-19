@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM Установка зависимостей для warmup.py.
 REM Предпочитает Python 3.12 (стабильный, все wheel-файлы доступны).
 
@@ -64,7 +65,8 @@ if errorlevel 1 (
 )
 
 echo Запускаю установщик в тихом режиме...
-start /wait "" "%LS_INSTALLER%" /S
+REM electron-builder NSIS: /S = silent, /allusers = ставить для всех (нужны права админа)
+start /wait "" "%LS_INSTALLER%" /S /allusers
 
 echo Жду появления .exe (до 90 секунд)...
 set /a "WAITED=0"
