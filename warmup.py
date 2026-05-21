@@ -488,10 +488,13 @@ def _find_ls_window() -> int:
 
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер настройки ВНУТРИ окна Linken Sphere
-    (отдельного top-level окна у мастера нет). Ищем NEXT STEP или GET STARTED
-    внутри окна LS — если есть, кликаем. На первых двух страницах кнопка
-    'NEXT STEP', на последней — 'GET STARTED', в том же месте.
-    Когда мастер закончится, обе кнопки исчезнут, функция вернёт False."""
+    (отдельного top-level окна у мастера нет). Ищем кнопки внутри окна LS —
+    если есть, кликаем. Шаблоны по очереди:
+      - next_step       — первые две страницы wizard
+      - get_started     — последняя страница wizard ('Get Started >')
+      - get_started2    — приветственный экран после логина
+                          ('Welcome to Linken Sphere 2', другой фон)
+    Когда все исчезнут — функция вернёт False, поток пойдёт дальше."""
     if sys.platform != "win32":
         return False
 
@@ -507,7 +510,7 @@ def _dismiss_customize_wizard_step() -> bool:
     # которые могли бы дать ложный матч.
     search_top = rect.top + h // 2
 
-    for tpl_name in ("next_step", "get_started"):
+    for tpl_name in ("next_step", "get_started", "get_started2"):
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
             continue
         pt = _match_template_in_region(
