@@ -364,13 +364,18 @@ _visible_titles_logged = False
 
 def _dismiss_firewall_alert() -> bool:
     """При первом запуске LS Windows может показать Defender Firewall Alert.
-    Кликает 'Allow access' по координатам + дублирует Alt+A.
-    Возвращает True, если диалог был найден."""
+    Сначала пытается найти кнопку 'Allow access' по шаблону, иначе ищет окно
+    по заголовку и кликает по координатам + Alt+A. Возвращает True если
+    что-то закрыли."""
     global _visible_titles_logged
     if sys.platform != "win32":
         return False
 
-    # Заголовок зависит от локали Windows — пробуем все известные варианты
+    # 1) Шаблон allow_access.png — самый надёжный способ, не зависит от локали
+    if _click_allow_access_template():
+        return True
+
+    # 2) Заголовок зависит от локали Windows — пробуем все известные варианты
     titles = [
         "Windows Security Alert",
         "Windows Defender Firewall",
@@ -453,6 +458,54 @@ def _match_template_in_region(
         return None
     return (left + best_loc[0] + best_size[0] // 2,
             top + best_loc[1] + best_size[1] // 2)
+
+
+def _click_allow_access_template() -> bool:
+    """Ищет шаблон templates/allow_access.png на всём экране (кнопка
+    'Allow access' в Windows Defender Firewall Alert). Если найден —
+    кликает. Возвращает True если кликнули."""
+    if sys.platform != "win32":
+        return False
+    if not (TEMPLATES_DIR / "allow_access.png").exists():
+        return False
+    # Размер экрана для bbox
+    import ctypes.wintypes
+    screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+    screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+    pt = _match_template_in_region(
+        "allow_access", 0.80,
+        0, 0, screen_w, screen_h,
+    )
+    if pt is None:
+        return False
+    log.info("allow_access кнопка найдена @(%d,%d)", *pt)
+    _record_click(pt[0], pt[1], "allow_access")
+    pyautogui.click(pt[0], pt[1])
+    time.sleep(1.0)
+    return True
+
+
+def _wait_for_firewall_alert(seconds: float) -> bool:
+    """Активно следит `seconds` секунд за появлением Windows Firewall Alert.
+    Жмёт 'Allow access' двумя способами: сначала шаблон allow_access.png,
+    потом fallback на window-title + Alt+A. NEXT STEP в этот момент НЕ жмём.
+    Возвращает True если закрыл хоть один alert."""
+    log.info("ждём до %.0fс появления firewall alert (NEXT STEP пока НЕ жмём)…", seconds)
+    deadline = time.time() + seconds
+    closed_any = False
+    while time.time() < deadline:
+        if _click_allow_access_template():
+            closed_any = True
+            continue
+        if _dismiss_firewall_alert():
+            closed_any = True
+            continue
+        time.sleep(0.5)
+    if closed_any:
+        log.info("firewall alert закрыт")
+    else:
+        log.info("firewall alert не появился за отведённое время")
+    return closed_any
 
 
 def _find_ls_window() -> int:
@@ -749,14 +802,13 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
-    log.info("жду инициализацию Electron (15s) с попутным закрытием диалогов…")
-    init_deadline = time.time() + 15.0
-    while time.time() < init_deadline:
-        if _dismiss_firewall_alert():
-            continue
-        if _dismiss_customize_wizard_step():
-            continue
-        time.sleep(0.5)
+    log.info("жду инициализацию Electron (5s базовая пауза)…")
+    time.sleep(5.0)
+
+    # Первые 10 секунд после старта LS — следим ТОЛЬКО за firewall alert
+    # (Windows Defender Firewall). NEXT STEP в это время НЕ жмём, чтобы
+    # системный диалог успел всплыть и был обработан без перекрытия кликами.
+    _wait_for_firewall_alert(10.0)
 
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
     log.info("жду главный экран или экран входа (до %.0fs)…", timeout)
