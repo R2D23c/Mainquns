@@ -455,53 +455,73 @@ def _match_template_in_region(
             top + best_loc[1] + best_size[1] // 2)
 
 
+def _find_ls_window() -> int:
+    """Находит главное окно Linken Sphere (заголовок 'Linken Sphere',
+    крупный размер, на экране). Wizard первого запуска показывается ВНУТРИ
+    этого же окна, отдельного top-level окна у мастера нет."""
+    if sys.platform != "win32":
+        return 0
+    import ctypes.wintypes
+    candidates: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        title = buf.value
+        if title and "linken" in title.lower() and "sphere" in title.lower():
+            candidates.append(hwnd)
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    for hwnd in candidates:
+        rect = _RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w >= 600 and h >= 400 and rect.left > -1000 and rect.top > -1000:
+            return hwnd
+    return 0
+
+
 def _dismiss_customize_wizard_step() -> bool:
-    """При первом запуске LS показывает мастер 'Customize your experience'.
-    Ищет NEXT STEP по шаблону строго ВНУТРИ окна wizard (а не по всему экрану),
-    с высоким порогом совпадения. Если не находит — клик по фиксированной
-    точке внизу окна."""
+    """При первом запуске LS показывает мастер настройки ВНУТРИ окна Linken Sphere
+    (отдельного top-level окна у мастера нет). Ищем шаблон NEXT STEP внутри
+    окна LS — если есть, кликаем. Это работает на любой странице мастера,
+    пока кнопка видна; когда мастер закончится, кнопка исчезнет, функция
+    вернёт False и поток продолжится к логину/three_dots."""
     if sys.platform != "win32":
         return False
-    hwnd, matched = _find_window_by_any_title([
-        "Customize your experience",
-        "Customize",
-        "Welcome",
-    ])
-    if not hwnd:
+    if not (TEMPLATES_DIR / "next_step.png").exists():
         return False
 
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
-    time.sleep(0.4)
+    hwnd = _find_ls_window()
+    if not hwnd:
+        return False
 
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
 
-    # Ищем NEXT STEP только в нижней половине окна — там точно нет MINIMALISM/INFORMATIVE
-    # тайлов, которые своим тёмным интерьером могут спутать шаблон.
-    if (TEMPLATES_DIR / "next_step.png").exists():
-        search_top = rect.top + h // 2
-        pt = _match_template_in_region(
-            "next_step", 0.80,
-            rect.left, search_top, rect.right, rect.bottom,
-        )
-        if pt is not None:
-            log.info("Customize wizard: NEXT STEP по шаблону @(%d,%d)", *pt)
-            _record_click(pt[0], pt[1], "next_step")
-            pyautogui.click(pt[0], pt[1])
-            time.sleep(1.5)
-            return True
-        log.warning("шаблон next_step не нашёлся в нижней половине окна — fallback на координаты")
+    # Ищем NEXT STEP только в нижней половине окна LS — там не бывает
+    # тайлов MINIMALISM/INFORMATIVE и других тёмных прямоугольников, которые
+    # могли бы дать ложный матч.
+    search_top = rect.top + h // 2
+    pt = _match_template_in_region(
+        "next_step", 0.80,
+        rect.left, search_top, rect.right, rect.bottom,
+    )
+    if pt is None:
+        return False
 
-    # Fallback: клик по центру, 84% высоты окна (NEXT STEP замерен по двум
-    # скриншотам — в маленьком и большом масштабе он стабильно ~82-85% высоты).
-    nx = rect.left + w // 2
-    ny = rect.top + int(h * 0.84)
-    log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d) [fallback]",
-             hwnd, matched, w, h, nx, ny)
-    _record_click(nx, ny, "next_step")
-    pyautogui.click(nx, ny)
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    log.info("wizard: NEXT STEP найден в окне LS @(%d,%d)", *pt)
+    _record_click(pt[0], pt[1], "next_step")
+    pyautogui.click(pt[0], pt[1])
     time.sleep(1.5)
     return True
 
