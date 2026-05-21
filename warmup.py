@@ -461,28 +461,35 @@ def _match_template_in_region(
 
 
 def _click_allow_access_template() -> bool:
-    """Ищет шаблон templates/allow_access.png на всём экране (кнопка
-    'Allow access' в Windows Defender Firewall Alert). Если найден —
-    кликает. Возвращает True если кликнули."""
+    """Ищет шаблоны кнопок 'Allow' в Windows Defender Firewall Alert на всём
+    экране. Версии Windows отличаются — кнопка может называться
+    'Allow access' (со щитом UAC) или просто 'Allow' (Win11-style).
+    Перебирает шаблоны по очереди:
+      - allow_access   — Win10 стиль с щитом
+      - allow_access2  — Win11 стиль без щита
+    Возвращает True если что-то кликнули."""
     if sys.platform != "win32":
         return False
-    if not (TEMPLATES_DIR / "allow_access.png").exists():
-        return False
-    # Размер экрана для bbox
+
     import ctypes.wintypes
     screen_w = ctypes.windll.user32.GetSystemMetrics(0)
     screen_h = ctypes.windll.user32.GetSystemMetrics(1)
-    pt = _match_template_in_region(
-        "allow_access", 0.80,
-        0, 0, screen_w, screen_h,
-    )
-    if pt is None:
-        return False
-    log.info("allow_access кнопка найдена @(%d,%d)", *pt)
-    _record_click(pt[0], pt[1], "allow_access")
-    pyautogui.click(pt[0], pt[1])
-    time.sleep(1.0)
-    return True
+
+    for tpl_name in ("allow_access", "allow_access2"):
+        if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
+            continue
+        pt = _match_template_in_region(
+            tpl_name, 0.80,
+            0, 0, screen_w, screen_h,
+        )
+        if pt is None:
+            continue
+        log.info("%s кнопка найдена @(%d,%d)", tpl_name, *pt)
+        _record_click(pt[0], pt[1], tpl_name)
+        pyautogui.click(pt[0], pt[1])
+        time.sleep(1.0)
+        return True
+    return False
 
 
 def _wait_for_firewall_alert(seconds: float) -> bool:
