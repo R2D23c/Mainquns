@@ -492,21 +492,31 @@ def _click_allow_access_template() -> bool:
     return False
 
 
-def _wait_for_firewall_alert(seconds: float) -> bool:
+def _wait_for_firewall_alert(seconds: float, exit_after_close: bool = False) -> bool:
     """Активно следит `seconds` секунд за появлением Windows Firewall Alert.
     Жмёт 'Allow access' двумя способами: сначала шаблон allow_access.png,
     потом fallback на window-title + Alt+A. NEXT STEP в этот момент НЕ жмём.
+    Если exit_after_close=True — выходит сразу после первого успешного
+    закрытия (плюс 3с grace на случай повторного диалога).
     Возвращает True если закрыл хоть один alert."""
     log.info("ждём до %.0fс появления firewall alert (NEXT STEP пока НЕ жмём)…", seconds)
     deadline = time.time() + seconds
     closed_any = False
+    grace_deadline: float | None = None
     while time.time() < deadline:
         if _click_allow_access_template():
             closed_any = True
+            if exit_after_close:
+                grace_deadline = time.time() + 3.0
             continue
         if _dismiss_firewall_alert():
             closed_any = True
+            if exit_after_close:
+                grace_deadline = time.time() + 3.0
             continue
+        if grace_deadline is not None and time.time() > grace_deadline:
+            log.info("firewall alert закрыт, выходим из ожидания пораньше")
+            return True
         time.sleep(0.5)
     if closed_any:
         log.info("firewall alert закрыт")
@@ -1030,9 +1040,10 @@ def run() -> int:
         screenshot("08_started", shots)
 
         # 7.5. После START браузеры начинают ходить по URL'ам — Windows может
-        # снова показать firewall alert на разрешение сетевого доступа. Ловим
-        # его в течение 15 секунд (оба варианта Allow access / Allow).
-        _wait_for_firewall_alert(15.0)
+        # снова показать firewall alert на разрешение сетевого доступа. Иногда
+        # он всплывает не сразу, а через минуту, поэтому окно ожидания 90с.
+        # Если alert появился и был закрыт — выходим раньше (без полного ожидания).
+        _wait_for_firewall_alert(90.0, exit_after_close=True)
 
         # 8. отработанный файл — в done/
         archive_used_file(file_to_attach, cfg)
