@@ -554,6 +554,8 @@ def _dismiss_customize_wizard_step() -> bool:
       - get_started     — последняя страница wizard ('Get Started >')
       - get_started2    — приветственный экран после логина
                           ('Welcome to Linken Sphere 2', другой фон)
+      - skip            — иногда всплывающее окно с малозаметной кнопкой SKIP
+      - close_x         — финальный мелкий крестик ✕ на следующем после skip окне
     Когда все исчезнут — функция вернёт False, поток пойдёт дальше."""
     if sys.platform != "win32":
         return False
@@ -565,16 +567,26 @@ def _dismiss_customize_wizard_step() -> bool:
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     h = rect.bottom - rect.top
-    # Ищем кнопку только в нижней половине окна LS — там не бывает
-    # тайлов MINIMALISM/INFORMATIVE и других тёмных прямоугольников,
-    # которые могли бы дать ложный матч.
-    search_top = rect.top + h // 2
+    lower_half_top = rect.top + h // 2
 
-    for tpl_name in ("next_step", "get_started", "get_started2"):
+    # (имя шаблона, top границы поиска, confidence)
+    # next_step/get_started* — только нижняя половина (избегаем ложных матчей
+    # на тайлы MINIMALISM/INFORMATIVE и тёмные блоки).
+    # skip/close_x — могут быть где угодно в окне, повышаем порог чтобы
+    # случайно не зацепить close-кнопку самого LS или другие крестики.
+    candidates = [
+        ("next_step",    lower_half_top, 0.80),
+        ("get_started",  lower_half_top, 0.80),
+        ("get_started2", lower_half_top, 0.80),
+        ("skip",         rect.top,       0.85),
+        ("close_x",      rect.top,       0.90),
+    ]
+
+    for tpl_name, search_top, conf in candidates:
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
             continue
         pt = _match_template_in_region(
-            tpl_name, 0.80,
+            tpl_name, conf,
             rect.left, search_top, rect.right, rect.bottom,
         )
         if pt is not None:
