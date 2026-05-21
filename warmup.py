@@ -411,28 +411,48 @@ def _dismiss_firewall_alert() -> bool:
 def _match_template_in_region(
     name: str, confidence: float,
     left: int, top: int, right: int, bottom: int,
+    scales: tuple[float, ...] = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0),
 ) -> tuple[int, int] | None:
-    """Template-matching только внутри заданного прямоугольника экрана.
-    Возвращает абсолютные координаты центра матча, либо None."""
+    """Template-matching внутри прямоугольника экрана с перебором масштабов.
+    cv2 не делает scale-invariant matching, поэтому если шаблон сохранён при
+    одном DPI, а ищем при другом — нужно подставить размер. Возвращает
+    абсолютные координаты центра лучшего матча, либо None."""
     tpl_path = TEMPLATES_DIR / f"{name}.png"
-    tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
-    if tpl is None:
+    tpl_orig = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
+    if tpl_orig is None:
         log.error("шаблон %s не читается", tpl_path)
         return None
-    th, tw = tpl.shape[:2]
-    if right - left < tw or bottom - top < th:
-        log.warning("регион (%d,%d,%d,%d) меньше шаблона %s (%dx%d)",
-                    left, top, right, bottom, name, tw, th)
+    region_w = right - left
+    region_h = bottom - top
+    if region_w <= 0 or region_h <= 0:
         return None
     img = ImageGrab.grab(bbox=(left, top, right, bottom))
     region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    res = cv2.matchTemplate(region, tpl, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(res)
-    log.info("match %s in region: confidence=%.3f @local(%d,%d)",
-             name, max_val, max_loc[0], max_loc[1])
-    if max_val < confidence:
+
+    best_val = 0.0
+    best_loc = (0, 0)
+    best_size = (0, 0)
+    best_scale = 1.0
+    orig_h, orig_w = tpl_orig.shape[:2]
+    for s in scales:
+        nw, nh = max(1, int(orig_w * s)), max(1, int(orig_h * s))
+        if nw >= region_w or nh >= region_h:
+            continue
+        tpl = cv2.resize(tpl_orig, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
+        res = cv2.matchTemplate(region, tpl, cv2.TM_CCOEFF_NORMED)
+        _, val, _, loc = cv2.minMaxLoc(res)
+        if val > best_val:
+            best_val = val
+            best_loc = loc
+            best_size = (nw, nh)
+            best_scale = s
+
+    log.info("match %s multiscale best=%.3f scale=%.2f @local(%d,%d) size=%dx%d",
+             name, best_val, best_scale, best_loc[0], best_loc[1], *best_size)
+    if best_val < confidence or best_size == (0, 0):
         return None
-    return (left + max_loc[0] + tw // 2, top + max_loc[1] + th // 2)
+    return (left + best_loc[0] + best_size[0] // 2,
+            top + best_loc[1] + best_size[1] // 2)
 
 
 def _dismiss_customize_wizard_step() -> bool:
@@ -474,13 +494,10 @@ def _dismiss_customize_wizard_step() -> bool:
             return True
         log.warning("шаблон next_step не нашёлся в нижней половине окна — fallback на координаты")
 
-    # Fallback: клик в фиксированной точке внизу окна.
-    # NEXT STEP находится примерно в 75 пикселях от низа окна по центру.
+    # Fallback: клик по центру, 84% высоты окна (NEXT STEP замерен по двум
+    # скриншотам — в маленьком и большом масштабе он стабильно ~82-85% высоты).
     nx = rect.left + w // 2
-    ny = rect.bottom - 75
-    # Защита: если окно мелкое, не дать кнопке уйти выше середины
-    if ny < rect.top + h // 2:
-        ny = rect.top + int(h * 0.82)
+    ny = rect.top + int(h * 0.84)
     log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d) [fallback]",
              hwnd, matched, w, h, nx, ny)
     _record_click(nx, ny, "next_step")
