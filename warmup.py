@@ -488,13 +488,11 @@ def _find_ls_window() -> int:
 
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер настройки ВНУТРИ окна Linken Sphere
-    (отдельного top-level окна у мастера нет). Ищем шаблон NEXT STEP внутри
-    окна LS — если есть, кликаем. Это работает на любой странице мастера,
-    пока кнопка видна; когда мастер закончится, кнопка исчезнет, функция
-    вернёт False и поток продолжится к логину/three_dots."""
+    (отдельного top-level окна у мастера нет). Ищем NEXT STEP или GET STARTED
+    внутри окна LS — если есть, кликаем. На первых двух страницах кнопка
+    'NEXT STEP', на последней — 'GET STARTED', в том же месте.
+    Когда мастер закончится, обе кнопки исчезнут, функция вернёт False."""
     if sys.platform != "win32":
-        return False
-    if not (TEMPLATES_DIR / "next_step.png").exists():
         return False
 
     hwnd = _find_ls_window()
@@ -503,27 +501,28 @@ def _dismiss_customize_wizard_step() -> bool:
 
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-    w = rect.right - rect.left
     h = rect.bottom - rect.top
-
-    # Ищем NEXT STEP только в нижней половине окна LS — там не бывает
-    # тайлов MINIMALISM/INFORMATIVE и других тёмных прямоугольников, которые
-    # могли бы дать ложный матч.
+    # Ищем кнопку только в нижней половине окна LS — там не бывает
+    # тайлов MINIMALISM/INFORMATIVE и других тёмных прямоугольников,
+    # которые могли бы дать ложный матч.
     search_top = rect.top + h // 2
-    pt = _match_template_in_region(
-        "next_step", 0.80,
-        rect.left, search_top, rect.right, rect.bottom,
-    )
-    if pt is None:
-        return False
 
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
-    time.sleep(0.3)
-    log.info("wizard: NEXT STEP найден в окне LS @(%d,%d)", *pt)
-    _record_click(pt[0], pt[1], "next_step")
-    pyautogui.click(pt[0], pt[1])
-    time.sleep(1.5)
-    return True
+    for tpl_name in ("next_step", "get_started"):
+        if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
+            continue
+        pt = _match_template_in_region(
+            tpl_name, 0.80,
+            rect.left, search_top, rect.right, rect.bottom,
+        )
+        if pt is not None:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+            log.info("wizard: %s найден в окне LS @(%d,%d)", tpl_name.upper(), *pt)
+            _record_click(pt[0], pt[1], tpl_name)
+            pyautogui.click(pt[0], pt[1])
+            time.sleep(1.5)
+            return True
+    return False
 
 
 def _find_auth_window() -> int:
