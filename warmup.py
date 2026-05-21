@@ -312,17 +312,97 @@ def _find_window_by_title_substring(substring: str) -> int:
     return found[0]
 
 
+def _find_window_by_any_title(substrings: list[str]) -> tuple[int, str]:
+    """Возвращает (hwnd, matched_title) первого видимого top-level окна,
+    заголовок которого содержит любую из подстрок. Регистронезависимо."""
+    import ctypes.wintypes
+    found: list[tuple[int, str]] = []
+    subs_lower = [s.lower() for s in substrings]
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        title = buf.value
+        if not title:
+            return True
+        tl = title.lower()
+        for sub in subs_lower:
+            if sub in tl:
+                found.append((hwnd, title))
+                return False
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    return found[0] if found else (0, "")
+
+
+def _log_visible_titles() -> None:
+    """Логирует все видимые окна с непустым заголовком — для отладки."""
+    import ctypes.wintypes
+    titles: list[str] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        if buf.value:
+            titles.append(buf.value)
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    log.info("видимые окна (%d): %s", len(titles), titles)
+
+
+# Кэш, чтобы не спамить лог при каждом тике цикла ожидания
+_visible_titles_logged = False
+
+
 def _dismiss_firewall_alert() -> bool:
     """При первом запуске LS Windows может показать Defender Firewall Alert.
-    Жмём Alt+A (Allow access). Возвращает True, если диалог был найден."""
+    Кликает 'Allow access' по координатам + дублирует Alt+A.
+    Возвращает True, если диалог был найден."""
+    global _visible_titles_logged
     if sys.platform != "win32":
         return False
-    hwnd = _find_window_by_title_substring("Windows Security Alert")
+
+    # Заголовок зависит от локали Windows — пробуем все известные варианты
+    titles = [
+        "Windows Security Alert",
+        "Windows Defender Firewall",
+        "Брандмауэр",
+        "Безопасность Windows",
+        "Оповещение системы безопасности",
+    ]
+    hwnd, matched = _find_window_by_any_title(titles)
     if not hwnd:
+        if not _visible_titles_logged:
+            _log_visible_titles()
+            _visible_titles_logged = True
         return False
-    log.info("Firewall Alert hwnd=%d → Allow access (Alt+A)", hwnd)
+
+    log.info("Firewall Alert hwnd=%d title=%r", hwnd, matched)
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.5)
+
+    rect = _RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    # 'Allow access' — справа внизу. Координаты замерены на стандартном виде
+    # диалога: x ~ 65% ширины, y ~ 87% высоты.
+    bx = rect.left + int(w * 0.65)
+    by = rect.top + int(h * 0.87)
+    log.info("клик 'Allow access' @(%d,%d) (окно %dx%d)", bx, by, w, h)
+    _record_click(bx, by, "fw_allow")
+    pyautogui.click(bx, by)
+    time.sleep(0.5)
+
+    # Подстраховка: на некоторых системах кнопка отзывается на Alt+A
     pyautogui.hotkey("alt", "a")
     time.sleep(1.0)
     return True
@@ -333,7 +413,11 @@ def _dismiss_customize_wizard_step() -> bool:
     Кликает NEXT STEP внизу окна. Возвращает True, если шаг был выполнен."""
     if sys.platform != "win32":
         return False
-    hwnd = _find_window_by_title_substring("Customize your experience")
+    hwnd, matched = _find_window_by_any_title([
+        "Customize your experience",
+        "Customize",
+        "Welcome",
+    ])
     if not hwnd:
         return False
 
@@ -346,7 +430,8 @@ def _dismiss_customize_wizard_step() -> bool:
     # NEXT STEP — по центру внизу, ~91% высоты окна (замерено по скриншоту)
     nx = rect.left + w // 2
     ny = rect.top + int(h * 0.91)
-    log.info("Customize wizard hwnd=%d %dx%d → NEXT STEP @(%d,%d)", hwnd, w, h, nx, ny)
+    log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d)",
+             hwnd, matched, w, h, nx, ny)
     _record_click(nx, ny, "next_step")
     pyautogui.click(nx, ny)
     time.sleep(1.5)
@@ -541,8 +626,14 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
-    log.info("жду инициализацию Electron (15s)…")
-    time.sleep(15.0)
+    log.info("жду инициализацию Electron (15s) с попутным закрытием диалогов…")
+    init_deadline = time.time() + 15.0
+    while time.time() < init_deadline:
+        if _dismiss_firewall_alert():
+            continue
+        if _dismiss_customize_wizard_step():
+            continue
+        time.sleep(0.5)
 
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
     log.info("жду главный экран или экран входа (до %.0fs)…", timeout)
