@@ -1029,6 +1029,11 @@ def run() -> int:
         click("start_button", cfg)
         screenshot("08_started", shots)
 
+        # 7.5. После START браузеры начинают ходить по URL'ам — Windows может
+        # снова показать firewall alert на разрешение сетевого доступа. Ловим
+        # его в течение 15 секунд (оба варианта Allow access / Allow).
+        _wait_for_firewall_alert(15.0)
+
         # 8. отработанный файл — в done/
         archive_used_file(file_to_attach, cfg)
 
