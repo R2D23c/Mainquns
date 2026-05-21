@@ -286,6 +286,73 @@ def _type_via_clipboard(text: str) -> None:
     time.sleep(0.2)
 
 
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _find_window_by_title_substring(substring: str) -> int:
+    """Возвращает hwnd видимого top-level окна, заголовок которого содержит подстроку."""
+    import ctypes.wintypes
+    found = [0]
+    sub_lower = substring.lower()
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        if buf.value and sub_lower in buf.value.lower():
+            found[0] = hwnd
+            return False
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    return found[0]
+
+
+def _dismiss_firewall_alert() -> bool:
+    """При первом запуске LS Windows может показать Defender Firewall Alert.
+    Жмём Alt+A (Allow access). Возвращает True, если диалог был найден."""
+    if sys.platform != "win32":
+        return False
+    hwnd = _find_window_by_title_substring("Windows Security Alert")
+    if not hwnd:
+        return False
+    log.info("Firewall Alert hwnd=%d → Allow access (Alt+A)", hwnd)
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.5)
+    pyautogui.hotkey("alt", "a")
+    time.sleep(1.0)
+    return True
+
+
+def _dismiss_customize_wizard_step() -> bool:
+    """При первом запуске LS показывает мастер 'Customize your experience'.
+    Кликает NEXT STEP внизу окна. Возвращает True, если шаг был выполнен."""
+    if sys.platform != "win32":
+        return False
+    hwnd = _find_window_by_title_substring("Customize your experience")
+    if not hwnd:
+        return False
+
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    rect = _RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    # NEXT STEP — по центру внизу, ~91% высоты окна (замерено по скриншоту)
+    nx = rect.left + w // 2
+    ny = rect.top + int(h * 0.91)
+    log.info("Customize wizard hwnd=%d %dx%d → NEXT STEP @(%d,%d)", hwnd, w, h, nx, ny)
+    _record_click(nx, ny, "next_step")
+    pyautogui.click(nx, ny)
+    time.sleep(1.5)
+    return True
+
+
 def _find_auth_window() -> int:
     """Ищет окно Linken Sphere 2 с формой входа. Разворачивает если свёрнуто.
     Пропускает мелкие/служебные окна Electron с тем же заголовком."""
@@ -312,10 +379,6 @@ def _find_auth_window() -> int:
     ctypes.windll.user32.EnumWindows(_cb, 0)
     log.info("видимые окна: %s", all_titles)
     log.info("кандидатов на окно входа: %d", len(candidates))
-
-    class _RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
     SW_RESTORE = 9
     for hwnd in candidates:
@@ -357,10 +420,6 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
 
     log.info("login_if_needed: обнаружен экран входа (hwnd=%d)", hwnd)
     screenshot("login_screen", cfg.getboolean("logging", "screenshots"))
-
-    class _RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
@@ -432,6 +491,23 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
         log.info("Linken Sphere 2 уже запущен (экран входа), не перезапускаем")
         return
 
+    # Уже висит мастер первого запуска — пройдём его и продолжим
+    if sys.platform == "win32" and _find_window_by_title_substring("Customize your experience"):
+        log.info("Linken Sphere 2 уже запущен (мастер первого запуска), прокликиваю")
+        deadline_wiz = time.time() + 60.0
+        while time.time() < deadline_wiz:
+            if _dismiss_firewall_alert():
+                continue
+            if _dismiss_customize_wizard_step():
+                continue
+            if find_template("three_dots", conf) is not None:
+                log.info("после мастера — главный экран")
+                return
+            if _find_auth_window():
+                log.info("после мастера — экран входа")
+                return
+            time.sleep(0.5)
+
     path = cfg.get("startup", "linken_sphere_path")
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -473,6 +549,12 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     deadline_ls = time.time() + timeout
     found_screen = None
     while time.time() < deadline_ls:
+        # При первом запуске LS на чистой машине могут всплыть диалоги —
+        # закрываем их прежде, чем смотреть на основные экраны.
+        if _dismiss_firewall_alert():
+            continue
+        if _dismiss_customize_wizard_step():
+            continue
         if find_template("three_dots", conf) is not None:
             found_screen = "main"
             break
