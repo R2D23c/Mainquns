@@ -410,7 +410,9 @@ def _dismiss_firewall_alert() -> bool:
 
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер 'Customize your experience'.
-    Кликает NEXT STEP внизу окна. Возвращает True, если шаг был выполнен."""
+    Сначала пытается найти и кликнуть кнопку NEXT STEP по шаблону
+    (templates/next_step.png). Если шаблона нет — клик по координатам
+    (центр окна, 88% высоты)."""
     if sys.platform != "win32":
         return False
     hwnd, matched = _find_window_by_any_title([
@@ -422,15 +424,27 @@ def _dismiss_customize_wizard_step() -> bool:
         return False
 
     ctypes.windll.user32.SetForegroundWindow(hwnd)
-    time.sleep(0.3)
+    time.sleep(0.4)
+
+    # Пробуем по шаблону — это надёжно при любых размерах окна
+    if (TEMPLATES_DIR / "next_step.png").exists():
+        pt = find_template("next_step", 0.7)
+        if pt is not None:
+            log.info("Customize wizard (по шаблону): NEXT STEP @(%d,%d)", *pt)
+            _record_click(pt[0], pt[1], "next_step")
+            pyautogui.click(pt[0], pt[1])
+            time.sleep(1.5)
+            return True
+        log.warning("шаблон next_step есть, но не нашёлся на экране — fallback на координаты")
+
+    # Fallback: клик по центру внизу окна
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
-    # NEXT STEP — по центру внизу, ~91% высоты окна (замерено по скриншоту)
     nx = rect.left + w // 2
-    ny = rect.top + int(h * 0.91)
-    log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d)",
+    ny = rect.top + int(h * 0.88)
+    log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d) [fallback]",
              hwnd, matched, w, h, nx, ny)
     _record_click(nx, ny, "next_step")
     pyautogui.click(nx, ny)
