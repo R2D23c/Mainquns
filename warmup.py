@@ -408,11 +408,38 @@ def _dismiss_firewall_alert() -> bool:
     return True
 
 
+def _match_template_in_region(
+    name: str, confidence: float,
+    left: int, top: int, right: int, bottom: int,
+) -> tuple[int, int] | None:
+    """Template-matching только внутри заданного прямоугольника экрана.
+    Возвращает абсолютные координаты центра матча, либо None."""
+    tpl_path = TEMPLATES_DIR / f"{name}.png"
+    tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
+    if tpl is None:
+        log.error("шаблон %s не читается", tpl_path)
+        return None
+    th, tw = tpl.shape[:2]
+    if right - left < tw or bottom - top < th:
+        log.warning("регион (%d,%d,%d,%d) меньше шаблона %s (%dx%d)",
+                    left, top, right, bottom, name, tw, th)
+        return None
+    img = ImageGrab.grab(bbox=(left, top, right, bottom))
+    region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    res = cv2.matchTemplate(region, tpl, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    log.info("match %s in region: confidence=%.3f @local(%d,%d)",
+             name, max_val, max_loc[0], max_loc[1])
+    if max_val < confidence:
+        return None
+    return (left + max_loc[0] + tw // 2, top + max_loc[1] + th // 2)
+
+
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер 'Customize your experience'.
-    Сначала пытается найти и кликнуть кнопку NEXT STEP по шаблону
-    (templates/next_step.png). Если шаблона нет — клик по координатам
-    (центр окна, 88% высоты)."""
+    Ищет NEXT STEP по шаблону строго ВНУТРИ окна wizard (а не по всему экрану),
+    с высоким порогом совпадения. Если не находит — клик по фиксированной
+    точке внизу окна."""
     if sys.platform != "win32":
         return False
     hwnd, matched = _find_window_by_any_title([
@@ -426,24 +453,34 @@ def _dismiss_customize_wizard_step() -> bool:
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.4)
 
-    # Пробуем по шаблону — это надёжно при любых размерах окна
-    if (TEMPLATES_DIR / "next_step.png").exists():
-        pt = find_template("next_step", 0.7)
-        if pt is not None:
-            log.info("Customize wizard (по шаблону): NEXT STEP @(%d,%d)", *pt)
-            _record_click(pt[0], pt[1], "next_step")
-            pyautogui.click(pt[0], pt[1])
-            time.sleep(1.5)
-            return True
-        log.warning("шаблон next_step есть, но не нашёлся на экране — fallback на координаты")
-
-    # Fallback: клик по центру внизу окна
     rect = _RECT()
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
+
+    # Ищем NEXT STEP только в нижней половине окна — там точно нет MINIMALISM/INFORMATIVE
+    # тайлов, которые своим тёмным интерьером могут спутать шаблон.
+    if (TEMPLATES_DIR / "next_step.png").exists():
+        search_top = rect.top + h // 2
+        pt = _match_template_in_region(
+            "next_step", 0.80,
+            rect.left, search_top, rect.right, rect.bottom,
+        )
+        if pt is not None:
+            log.info("Customize wizard: NEXT STEP по шаблону @(%d,%d)", *pt)
+            _record_click(pt[0], pt[1], "next_step")
+            pyautogui.click(pt[0], pt[1])
+            time.sleep(1.5)
+            return True
+        log.warning("шаблон next_step не нашёлся в нижней половине окна — fallback на координаты")
+
+    # Fallback: клик в фиксированной точке внизу окна.
+    # NEXT STEP находится примерно в 75 пикселях от низа окна по центру.
     nx = rect.left + w // 2
-    ny = rect.top + int(h * 0.88)
+    ny = rect.bottom - 75
+    # Защита: если окно мелкое, не дать кнопке уйти выше середины
+    if ny < rect.top + h // 2:
+        ny = rect.top + int(h * 0.82)
     log.info("Customize wizard hwnd=%d title=%r %dx%d → NEXT STEP @(%d,%d) [fallback]",
              hwnd, matched, w, h, nx, ny)
     _record_click(nx, ny, "next_step")
