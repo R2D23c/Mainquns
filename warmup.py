@@ -518,6 +518,19 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
         return
 
     log.info("login_if_needed: обнаружен экран входа (hwnd=%d)", hwnd)
+
+    # КРИТИЧНО: до клика по форме входа закрыть всё модальное, что может быть
+    # поверх LS (Windows Defender Firewall Alert, мастер Customize). Иначе
+    # клики по координатам логин-формы попадут в этот диалог, а не в LS.
+    for _ in range(10):
+        did = False
+        if _dismiss_firewall_alert():
+            did = True
+        if _dismiss_customize_wizard_step():
+            did = True
+        if not did:
+            break
+
     screenshot("login_screen", cfg.getboolean("logging", "screenshots"))
 
     rect = _RECT()
@@ -564,10 +577,20 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     log.info("нажат SIGN IN, жду главный экран…")
     time.sleep(3.0)
 
+    # После SIGN IN ждём three_dots, но параллельно чистим всплывающие диалоги
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
-    wait_for("three_dots", conf, timeout)
-    log.info("вход выполнен, главный экран готов")
-    time.sleep(1.0)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _dismiss_firewall_alert():
+            continue
+        if _dismiss_customize_wizard_step():
+            continue
+        if find_template("three_dots", conf) is not None:
+            log.info("вход выполнен, главный экран готов")
+            time.sleep(1.0)
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"three_dots не появился за {timeout}s после SIGN IN")
 
 
 def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
@@ -578,25 +601,22 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     """
     conf = cfg.getfloat("matching", "confidence")
 
-    # САМЫМ ПЕРВЫМ ДЕЛОМ — закрываем диалоги первого запуска, если уже висят:
-    # firewall alert и мастер 'Customize your experience'. Они блокируют LS, поэтому
-    # три точки/окно входа никогда не появятся, пока их не пройти.
-    for _ in range(20):
-        did = False
+    # Первые 3 секунды: ищем three_dots, но параллельно чистим firewall alert
+    # и мастер первого запуска — они могут всплыть с задержкой после старта warmup.
+    quick_deadline = time.time() + 3.0
+    found_main = False
+    while time.time() < quick_deadline:
         if _dismiss_firewall_alert():
-            did = True
+            continue
         if _dismiss_customize_wizard_step():
-            did = True
-        if not did:
+            continue
+        if find_template("three_dots", conf) is not None:
+            found_main = True
             break
-
-    quick_timeout = 3.0
-    try:
-        wait_for("three_dots", conf, quick_timeout)
+        time.sleep(0.4)
+    if found_main:
         log.info("Linken Sphere 2 уже на главном экране")
         return
-    except TimeoutError:
-        pass
 
     # Уже показывает экран входа — не убиваем, просто дадим login_if_needed войти
     if sys.platform == "win32" and _find_auth_window():
