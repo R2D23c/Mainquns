@@ -577,6 +577,19 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     Иначе мягко завершаем старые процессы, запускаем через ShellExecuteW и ждём.
     """
     conf = cfg.getfloat("matching", "confidence")
+
+    # САМЫМ ПЕРВЫМ ДЕЛОМ — закрываем диалоги первого запуска, если уже висят:
+    # firewall alert и мастер 'Customize your experience'. Они блокируют LS, поэтому
+    # три точки/окно входа никогда не появятся, пока их не пройти.
+    for _ in range(20):
+        did = False
+        if _dismiss_firewall_alert():
+            did = True
+        if _dismiss_customize_wizard_step():
+            did = True
+        if not did:
+            break
+
     quick_timeout = 3.0
     try:
         wait_for("three_dots", conf, quick_timeout)
