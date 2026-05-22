@@ -603,9 +603,22 @@ def _dismiss_customize_wizard_step() -> bool:
     for tpl_name, search_top, conf in candidates:
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
             continue
+
+        # close_x опасен: его шаблон визуально близок к close-кнопке самой LS
+        # в правом верхнем углу окна. Исключаем верхнюю title-bar полосу и
+        # правые 100px (где сидит min/max/close самого LS).
+        if tpl_name == "close_x":
+            search_left = rect.left
+            search_top_eff = rect.top + 50
+            search_right = rect.right - 100
+        else:
+            search_left = rect.left
+            search_top_eff = search_top
+            search_right = rect.right
+
         pt = _match_template_in_region(
             tpl_name, conf,
-            rect.left, search_top, rect.right, rect.bottom,
+            search_left, search_top_eff, search_right, rect.bottom,
         )
         if pt is not None:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
