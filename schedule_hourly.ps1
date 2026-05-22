@@ -19,8 +19,8 @@ $action = New-ScheduledTaskAction `
     -WorkingDirectory $ScriptDir
 
 $trigger = New-ScheduledTaskTrigger `
-    -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Hours 1)
+    -Once -At (Get-Date).AddSeconds(15) `
+    -RepetitionInterval (New-TimeSpan -Minutes 52)
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -44,7 +44,7 @@ Register-ScheduledTask `
 
 Write-Host ""
 Write-Host "[OK] Задача '$TaskName' создана."
-Write-Host " - Первый запуск через минуту, далее каждый час."
+Write-Host " - Первый запуск через 15 секунд, далее каждые 52 минуты."
 Write-Host " - Окно cmd будет видно."
 Write-Host " - Работает только когда ты залогинен в Windows."
 Write-Host ""
