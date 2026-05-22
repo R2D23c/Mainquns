@@ -556,6 +556,13 @@ def _find_ls_window() -> int:
     return 0
 
 
+# Состояние для close_x: ищем крестик ✕ только в течение этого окна
+# после успешного клика на SKIP. Иначе шаблон ложно матчит close-кнопку
+# самой LS на повторных запусках, когда попапа со скипом уже нет.
+_skip_clicked_at: float = 0.0
+_CLOSE_X_GRACE_AFTER_SKIP = 30.0
+
+
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер настройки ВНУТРИ окна Linken Sphere
     (отдельного top-level окна у мастера нет). Ищем кнопки внутри окна LS —
@@ -565,8 +572,11 @@ def _dismiss_customize_wizard_step() -> bool:
       - get_started2    — приветственный экран после логина
                           ('Welcome to Linken Sphere 2', другой фон)
       - skip            — иногда всплывающее окно с малозаметной кнопкой SKIP
-      - close_x         — финальный мелкий крестик ✕ на следующем после skip окне
+      - close_x         — финальный мелкий крестик ✕ на следующем после skip окне;
+                          ищется ТОЛЬКО в течение 30с после клика на skip,
+                          чтобы не зацепить close-кнопку самого LS
     Когда все исчезнут — функция вернёт False, поток пойдёт дальше."""
+    global _skip_clicked_at
     if sys.platform != "win32":
         return False
 
@@ -580,17 +590,15 @@ def _dismiss_customize_wizard_step() -> bool:
     lower_half_top = rect.top + h // 2
 
     # (имя шаблона, top границы поиска, confidence)
-    # next_step/get_started* — только нижняя половина (избегаем ложных матчей
-    # на тайлы MINIMALISM/INFORMATIVE и тёмные блоки).
-    # skip/close_x — могут быть где угодно в окне, повышаем порог чтобы
-    # случайно не зацепить close-кнопку самого LS или другие крестики.
     candidates = [
         ("next_step",    lower_half_top, 0.80),
         ("get_started",  lower_half_top, 0.80),
         ("get_started2", lower_half_top, 0.80),
         ("skip",         rect.top,       0.85),
-        ("close_x",      rect.top,       0.90),
     ]
+    # close_x активен только в окне 30с после успешного клика на skip
+    if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
+        candidates.append(("close_x", rect.top, 0.90))
 
     for tpl_name, search_top, conf in candidates:
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
@@ -605,6 +613,8 @@ def _dismiss_customize_wizard_step() -> bool:
             log.info("wizard: %s найден в окне LS @(%d,%d)", tpl_name.upper(), *pt)
             _record_click(pt[0], pt[1], tpl_name)
             pyautogui.click(pt[0], pt[1])
+            if tpl_name == "skip":
+                _skip_clicked_at = time.time()
             time.sleep(1.5)
             return True
     return False
