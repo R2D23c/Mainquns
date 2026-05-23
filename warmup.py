@@ -265,6 +265,40 @@ def load_credentials() -> configparser.ConfigParser:
     return creds
 
 
+def notify_telegram(message: str) -> None:
+    """Шлёт сообщение в Telegram, если в credentials.ini заполнен [telegram].
+    Молча игнорирует все ошибки (нет токена, сеть упала, и т.д.) — чтобы
+    падение нотификации не мешало основному логированию."""
+    try:
+        creds = load_credentials()
+        if not creds.has_section("telegram"):
+            return
+        token = creds.get("telegram", "token", fallback="").strip()
+        chat_id = creds.get("telegram", "chat_id", fallback="").strip()
+        if not token or not chat_id:
+            return
+        if token in ("YOUR_BOT_TOKEN", "your_bot_token"):
+            return
+        if chat_id in ("YOUR_CHAT_ID", "your_chat_id"):
+            return
+
+        import urllib.request
+        import urllib.parse
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        # Лимит Telegram на текст — 4096 символов, обрезаем с запасом
+        data = urllib.parse.urlencode({
+            "chat_id": chat_id,
+            "text": message[:4000],
+            "disable_web_page_preview": "true",
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        log.info("telegram-уведомление отправлено")
+    except Exception as e:
+        log.warning("notify_telegram failed: %s", e)
+
+
 def _type_via_clipboard(text: str) -> None:
     """Вставляет текст через буфер обмена (работает с @, ! и любыми Unicode символами)."""
     if sys.platform != "win32":
@@ -1077,6 +1111,21 @@ def run() -> int:
     except Exception as exc:
         log.exception("сценарий упал: %s", exc)
         screenshot("ERROR", True)
+        # Telegram-уведомление с хвостом лога — чтоб сразу видеть, на чём упало
+        try:
+            import socket
+            tail_lines: list[str] = []
+            if LOG_FILE.exists():
+                with LOG_FILE.open(encoding="utf-8", errors="ignore") as f:
+                    tail_lines = f.readlines()[-15:]
+            notify_telegram(
+                f"❌ warmup упал\n"
+                f"машина: {socket.gethostname()}\n"
+                f"ошибка: {exc}\n\n"
+                f"последние строки лога:\n" + "".join(tail_lines)
+            )
+        except Exception:
+            pass
         return 1
 
 
