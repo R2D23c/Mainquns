@@ -64,6 +64,10 @@ pyautogui.PAUSE = 0.15
 # Топик играет роль «адреса» — кто знает строку, может слать push в эту тему.
 # Подписаться: приложение ntfy → Subscribe to topic → ввести значение ниже.
 NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
+# Сколько первых УСПЕШНЫХ запусков на новой машине ещё подтверждаем push'ем —
+# чтобы убедиться, что setup отработал. Дальше — тишина (только при падениях).
+SUCCESS_NOTIFY_COUNT = 2
+SUCCESS_STATE_FILE = ROOT / ".warmup_state"
 
 
 def setup_logging() -> logging.Logger:
@@ -268,6 +272,20 @@ def load_credentials() -> configparser.ConfigParser:
         )
     creds.read(path, encoding="utf-8")
     return creds
+
+
+def _read_success_count() -> int:
+    try:
+        return int(SUCCESS_STATE_FILE.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def _write_success_count(n: int) -> None:
+    try:
+        SUCCESS_STATE_FILE.write_text(str(n), encoding="utf-8")
+    except OSError as e:
+        log.warning("не удалось записать %s: %s", SUCCESS_STATE_FILE, e)
 
 
 def notify_ntfy(message: str, title: str = "warmup failed") -> None:
@@ -1104,6 +1122,21 @@ def run() -> int:
         archive_used_file(file_to_attach, cfg)
 
         log.info("сценарий завершён успешно")
+        # Первые N успешных запусков подтверждаем push'ем — чтобы убедиться,
+        # что setup на новой машине отработал. Дальше тишина (только падения).
+        count = _read_success_count()
+        if count < SUCCESS_NOTIFY_COUNT:
+            count += 1
+            _write_success_count(count)
+            try:
+                import socket
+                notify_ntfy(
+                    f"machine: {socket.gethostname()}\n"
+                    f"успешный запуск {count}/{SUCCESS_NOTIFY_COUNT}",
+                    title="warmup OK",
+                )
+            except Exception:
+                pass
         return 0
 
     except Exception as exc:
