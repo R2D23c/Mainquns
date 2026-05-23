@@ -60,6 +60,11 @@ LOG_FILE = ROOT / "warmup.log"
 pyautogui.FAILSAFE = True  # двинуть мышь в угол — аварийный стоп
 pyautogui.PAUSE = 0.15
 
+# Push-уведомления через ntfy.sh: на каждой машине без настройки.
+# Топик играет роль «адреса» — кто знает строку, может слать push в эту тему.
+# Подписаться: приложение ntfy → Subscribe to topic → ввести значение ниже.
+NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
+
 
 def setup_logging() -> logging.Logger:
     logger = logging.getLogger("warmup")
@@ -263,6 +268,33 @@ def load_credentials() -> configparser.ConfigParser:
         )
     creds.read(path, encoding="utf-8")
     return creds
+
+
+def notify_ntfy(message: str, title: str = "warmup failed") -> None:
+    """Шлёт push через ntfy.sh без какой-либо настройки на машине.
+    Все ошибки (сети нет, сервис лежит, и т.д.) глотаются — нотификация
+    никогда не должна мешать основному логированию."""
+    try:
+        import urllib.request
+        url = f"https://ntfy.sh/{NTFY_TOPIC}"
+        # Тело — текст уведомления. Header Title — заголовок (ASCII, чтобы
+        # без проблем пролезть через HTTP-заголовки). Priority/Tags —
+        # косметика для приложения ntfy.
+        req = urllib.request.Request(
+            url,
+            data=message[:4000].encode("utf-8"),
+            method="POST",
+            headers={
+                "Title": title,
+                "Priority": "high",
+                "Tags": "warning",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        log.info("ntfy-уведомление отправлено")
+    except Exception as e:
+        log.warning("notify_ntfy failed: %s", e)
 
 
 def _type_via_clipboard(text: str) -> None:
@@ -1077,6 +1109,19 @@ def run() -> int:
     except Exception as exc:
         log.exception("сценарий упал: %s", exc)
         screenshot("ERROR", True)
+        try:
+            import socket
+            tail_lines: list[str] = []
+            if LOG_FILE.exists():
+                with LOG_FILE.open(encoding="utf-8", errors="ignore") as f:
+                    tail_lines = f.readlines()[-15:]
+            notify_ntfy(
+                f"machine: {socket.gethostname()}\n"
+                f"error: {exc}\n\n"
+                f"tail:\n" + "".join(tail_lines)
+            )
+        except Exception:
+            pass
         return 1
 
 
