@@ -7,3 +7,4 @@ venv/
 .python_cmd
 credentials.ini
 .warmup_state
+.session_imported

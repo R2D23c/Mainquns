@@ -68,6 +68,10 @@ NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
 # чтобы убедиться, что setup отработал. Дальше — тишина (только при падениях).
 SUCCESS_NOTIFY_COUNT = 2
 SUCCESS_STATE_FILE = ROOT / ".warmup_state"
+# Флаг, что сессия уже импортирована на этой машине (хранит её имя).
+# Первый запуск импортит xlsx из session_imports/, дальше только warmup.
+SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
+SESSION_IMPORTS_DIR = ROOT / "session_imports"
 
 
 def setup_logging() -> logging.Logger:
@@ -1044,6 +1048,96 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
+def load_session_name() -> str | None:
+    """Имя сессии из credentials.ini [session] name. Оно же = имя xlsx-файла
+    в session_imports/ и поисковый запрос в Сфере. Хранится в credentials.ini
+    (gitignored), чтобы у каждой машины было своё и git pull его не трогал.
+    Возвращает None, если не задано — тогда импорт/поиск пропускаются (старое
+    поведение)."""
+    creds = load_credentials()
+    if not creds.has_section("session"):
+        return None
+    name = creds.get("session", "name", fallback="").strip()
+    if not name or name.lower() in ("session name", "your session name"):
+        return None
+    return name
+
+
+def _click_import_browse_file(cfg: configparser.ConfigParser) -> None:
+    """В окне Mass creation две одинаковые кнопки BROWSE FILE: левая — cookies
+    (TXT/JSON), правая — XLSX/CSV. Нам нужна ПРАВАЯ, поэтому ищем шаблон только
+    в правой половине экрана."""
+    conf = cfg.getfloat("matching", "confidence")
+    timeout = cfg.getfloat("matching", "wait_seconds")
+    sw = ctypes.windll.user32.GetSystemMetrics(0)
+    sh = ctypes.windll.user32.GetSystemMetrics(1)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pt = _match_template_in_region("browse_file", conf, sw // 2, 0, sw, sh)
+        if pt is not None:
+            log.info("BROWSE FILE (правая) @(%d,%d)", *pt)
+            _record_click(pt[0], pt[1], "browse_file")
+            pyautogui.click(pt[0], pt[1])
+            time.sleep(cfg.getfloat("matching", "step_delay"))
+            return
+        time.sleep(0.5)
+    raise TimeoutError("BROWSE FILE (правая, XLSX) не найдена в правой половине экрана")
+
+
+def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) -> None:
+    """Первый запуск на машине: импортит сессию из session_imports/<name>.xlsx
+    через MULTIPLE → BROWSE FILE (правая) → диалог → IMPORT. Дальше пропускается."""
+    if SESSION_IMPORTED_FLAG.exists():
+        prev = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
+        if prev == session_name:
+            log.info("сессия %r уже импортирована ранее — пропуск импорта", session_name)
+            return
+        log.info("в флаге другое имя (%r != %r) — импортирую заново", prev, session_name)
+
+    xlsx = SESSION_IMPORTS_DIR / f"{session_name}.xlsx"
+    if not xlsx.exists():
+        raise FileNotFoundError(
+            f"не найден файл импорта сессии: {xlsx}. "
+            f"проверь [session] name в credentials.ini и наличие файла в session_imports/"
+        )
+
+    shots = cfg.getboolean("logging", "screenshots")
+    log.info("импорт сессии %r из %s", session_name, xlsx)
+
+    # 1. MULTIPLE → окно Mass creation
+    click("multiple_button", cfg)
+    screenshot("D1_mass_creation", shots)
+
+    # 2. BROWSE FILE (правая, XLSX)
+    _click_import_browse_file(cfg)
+
+    # 3. нативный диалог: вписать путь и Enter
+    handle_open_file_dialog(str(xlsx), cfg)
+    screenshot("D2_file_chosen", shots)
+
+    # 4. IMPORT
+    click("import_button", cfg)
+    log.info("нажат IMPORT, жду создания сессии (10с)…")
+    time.sleep(10.0)
+    screenshot("D3_after_import", shots)
+
+    SESSION_IMPORTED_FLAG.write_text(session_name, encoding="utf-8")
+    log.info("сессия импортирована, флаг записан")
+
+
+def search_session(cfg: configparser.ConfigParser, session_name: str) -> None:
+    """Фокусирует поиск Сферы (Ctrl+F) и вписывает имя сессии — в списке
+    остаётся одна строка, three_dots на ней будет однозначным."""
+    log.info("поиск сессии по имени: %r", session_name)
+    pyautogui.hotkey("ctrl", "f")
+    time.sleep(0.6)
+    pyautogui.hotkey("ctrl", "a")
+    pyautogui.press("delete")
+    _type_via_clipboard(session_name)
+    time.sleep(1.5)  # дать списку отфильтроваться
+    screenshot("D4_searched", cfg.getboolean("logging", "screenshots"))
+
+
 def run() -> int:
     cfg = load_config()
     shots = cfg.getboolean("logging", "screenshots")
@@ -1060,6 +1154,14 @@ def run() -> int:
         login_if_needed(cfg)
 
         screenshot("00_initial", shots)
+
+        # 0.7 Сессия по имени (если задано [session] name в credentials.ini):
+        #     первый запуск — импорт xlsx, затем поиск по имени, чтобы three_dots
+        #     был однозначным. Если имя не задано — старое поведение (пропуск).
+        session_name = load_session_name()
+        if session_name:
+            import_session_if_needed(cfg, session_name)
+            search_session(cfg, session_name)
 
         # 1. меню "три точки"
         click("three_dots", cfg)
