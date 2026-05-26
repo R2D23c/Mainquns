@@ -1104,6 +1104,9 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) 
     shots = cfg.getboolean("logging", "screenshots")
     log.info("импорт сессии %r из %s", session_name, xlsx)
 
+    # подстраховка: закрыть firewall, если всплыл перед импортом
+    _dismiss_firewall_alert()
+
     # 1. MULTIPLE → окно Mass creation
     click("multiple_button", cfg)
     screenshot("D1_mass_creation", shots)
@@ -1117,8 +1120,9 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) 
 
     # 4. IMPORT
     click("import_button", cfg)
-    log.info("нажат IMPORT, жду создания сессии (10с)…")
-    time.sleep(10.0)
+    log.info("нажат IMPORT, жду создания сессии (10с) с попутным дисмиссом firewall…")
+    # импорт может дёрнуть сеть → возможен firewall alert; ждём 10с и чистим его
+    _wait_for_firewall_alert(10.0)
     screenshot("D3_after_import", shots)
 
     SESSION_IMPORTED_FLAG.write_text(session_name, encoding="utf-8")
@@ -1162,6 +1166,8 @@ def run() -> int:
         if session_name:
             import_session_if_needed(cfg, session_name)
             search_session(cfg, session_name)
+            # подстраховка перед three_dots: закрыть firewall, если всплыл
+            _dismiss_firewall_alert()
 
         # 1. меню "три точки"
         click("three_dots", cfg)
