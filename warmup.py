@@ -1058,7 +1058,7 @@ def load_session_name() -> str | None:
     if not creds.has_section("session"):
         return None
     name = creds.get("session", "name", fallback="").strip()
-    if not name or name.lower() in ("session name", "your session name"):
+    if not name or name.lower() in ("session name", "your session name", "yourname"):
         return None
     return name
 
