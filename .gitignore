@@ -8,3 +8,5 @@ venv/
 credentials.ini
 .warmup_state
 .session_imported
+.api_activated
+warmup_api.log
