@@ -36,6 +36,9 @@ LOG_FILE = ROOT / "warmup_api.log"
 CONFIG_PATH = ROOT / "config.ini"
 CREDS_PATH = ROOT / "credentials.ini"
 URLS_DIR = ROOT / "urls"
+# Флаг «сессия импортирована на этой машине», пишется UI-инсталляцией.
+# Формат: «<uuid>\t<name>» (новый) либо просто «<name>» (старый — fallback).
+SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 
 # Тот же топик, что и UI-флоу, — чтобы все push'ы шли в один канал.
 NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
@@ -132,6 +135,23 @@ def collect_url_pool() -> list[str]:
     return pool
 
 
+def load_session_imported_flag() -> tuple[str | None, str | None]:
+    """Читает .session_imported. Возвращает (uuid, name).
+    Поддерживает два формата:
+      - новый: «<uuid>\\t<name>» — записывается UI-инсталляцией после lookup
+      - старый: «<name>» — записан до перехода на uuid-flow
+    Если файла нет, возвращает (None, None) — сессию ещё не импортили."""
+    if not SESSION_IMPORTED_FLAG.exists():
+        return None, None
+    raw = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
+    if not raw:
+        return None, None
+    if "\t" in raw:
+        uuid, _, name = raw.partition("\t")
+        return uuid.strip() or None, name.strip() or None
+    return None, raw
+
+
 def pick_random_urls(pool: list[str], cfg: configparser.ConfigParser) -> list[str]:
     lo = cfg.getint("api", "urls_per_run_min", fallback=4)
     hi = cfg.getint("api", "urls_per_run_max", fallback=6)
@@ -148,7 +168,6 @@ class ApiClient:
     def __init__(self, base_url: str, timeout: float):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.token: str | None = None
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict | list | None:
         url = f"{self.base_url}{path}"
@@ -157,8 +176,6 @@ class ApiClient:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -180,9 +197,8 @@ class ApiClient:
             return raw.decode("utf-8", errors="ignore")
 
     def ping(self) -> None:
-        """Лёгкий ping — пытаемся GET /sessions без авторизации.
-        Если API-порт активен, ответ будет (хоть 401, хоть 200); если порт
-        не открыт, кидаем сетевую ошибку."""
+        """Лёгкий ping — пытаемся GET /sessions. Если API-порт активен, ответ
+        будет (хоть 401, хоть 200); если порт не открыт, кидаем сетевую ошибку."""
         try:
             self._request("GET", ENDPOINTS["sessions"])
         except ApiError as e:
@@ -193,19 +209,10 @@ class ApiClient:
             raise
 
     def signin(self, email: str, password: str) -> None:
-        out = self._request("POST", ENDPOINTS["signin"], {"email": email, "password": password})
-        token = None
-        if isinstance(out, dict):
-            token = out.get("token") or out.get("access_token") or out.get("jwt")
-        if not token:
-            # Часть реализаций кладёт токен в cookie/header. Если /signin вернул
-            # 200 без явного токена, продолжаем без него — сессионные cookies
-            # urllib не сохраняет, поэтому такой режим работать не будет; ловим
-            # это позже явной ошибкой при первом авторизованном вызове.
-            log.warning("signin: токен не найден в ответе — возможно, нужна другая схема auth")
-        else:
-            self.token = token
-            log.info("signin OK (token получен)")
+        """Логинит LS-приложение в аккаунт. Авторизация дальше держится
+        самим процессом LS — отдельных Bearer-токенов в API нет (см. дока)."""
+        self._request("POST", ENDPOINTS["signin"], {"email": email, "password": password})
+        log.info("signin OK")
 
     def list_sessions(self) -> list[dict]:
         out = self._request("GET", ENDPOINTS["sessions"])
@@ -216,13 +223,28 @@ class ApiClient:
         return out
 
     def find_session_by_name(self, name: str) -> dict:
+        """Возвращает единственную сессию с этим именем. Если их несколько —
+        ApiError: имя не уникально, ставим прогрев на паузу до ручного разбора.
+        Это safety-net на случай, если флаг .session_imported потерян или ещё
+        не записан (новый формат хранит uuid и эта функция вообще не вызывается)."""
+        sessions = self.list_sessions()
+        matches = [s for s in sessions if isinstance(s, dict) and s.get("name") == name]
+        if not matches:
+            raise ApiError(f"сессия с именем {name!r} не найдена в /sessions")
+        if len(matches) > 1:
+            uuids = [m.get("uuid") for m in matches]
+            raise ApiError(
+                f"коллизия имён: {len(matches)} сессий с именем {name!r}, "
+                f"uuids={uuids}. Удали лишние в LS или укажи uuid в .session_imported"
+            )
+        return matches[0]
+
+    def find_session_by_uuid(self, uuid: str) -> dict:
         sessions = self.list_sessions()
         for s in sessions:
-            if not isinstance(s, dict):
-                continue
-            if s.get("name") == name:
+            if isinstance(s, dict) and s.get("uuid") == uuid:
                 return s
-        raise ApiError(f"сессия с именем {name!r} не найдена в /sessions")
+        raise ApiError(f"сессия с uuid={uuid!r} не найдена — удалена вручную?")
 
     def start_warmup(
         self,
@@ -254,32 +276,36 @@ class ApiClient:
         return None
 
 
+# LS API: поле статуса — `status`, значения из доки:
+#   ["running", "stopped", "imported", "warmup", "automationRunning"]
+# Прогрев идёт == status == "warmup". Финал == status вышел из этого значения.
+WARMUP_STATUS = "warmup"
+
+
 def _is_warmup_done(state: dict | None) -> bool:
-    """Эвристика: сессия больше не в состоянии warming/running.
-    Точное поле LS может варьироваться — смотрим самые типичные."""
     if state is None:
         return False
-    raw_state = state.get("state") or state.get("status") or state.get("warmup_state")
-    if not isinstance(raw_state, str):
-        # Если поля нет — считаем, что live ещё идёт; финал ловим по таймауту.
+    status = state.get("status")
+    if not isinstance(status, str):
         return False
-    s = raw_state.lower()
-    busy = ("warm", "running", "starting", "in_progress", "active")
-    return not any(b in s for b in busy)
+    return status != WARMUP_STATUS
 
 
 def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigParser) -> bool:
     interval = cfg.getfloat("api", "poll_interval_seconds", fallback=5.0)
     timeout = cfg.getfloat("api", "poll_timeout_seconds", fallback=1200.0)
     deadline = time.time() + timeout
-    last_state: str | None = None
+    last_status: str | None = None
+    # Дать LS пару секунд перейти в "warmup" — иначе можем словить старый
+    # status и решить, что прогрев уже закончился.
+    time.sleep(min(interval, 3.0))
     while time.time() < deadline:
         state = client.get_session_state(uuid)
         if state is not None:
-            raw = state.get("state") or state.get("status") or state.get("warmup_state")
-            if raw != last_state:
-                log.info("state: %r", raw)
-                last_state = raw
+            status = state.get("status")
+            if status != last_status:
+                log.info("status: %r", status)
+                last_status = status
             if _is_warmup_done(state):
                 return True
         time.sleep(interval)
@@ -312,12 +338,21 @@ def run() -> int:
         log.info("signin как %s", email)
         client.signin(email, password)
 
-        log.info("ищу сессию по имени %r", session_name)
-        sess = client.find_session_by_name(session_name)
-        uuid = sess.get("uuid") or sess.get("id")
-        if not uuid:
-            raise ApiError(f"в сессии {session_name!r} нет uuid: {sess}")
-        log.info("найдена сессия uuid=%s", uuid)
+        # Сначала пробуем uuid из флага .session_imported (его пишет UI-инсталляция
+        # после импорта xlsx + GET /sessions). Это убирает любые коллизии имён.
+        # Если флага нет или в нём только имя — fallback на поиск по имени.
+        stored_uuid, stored_name = load_session_imported_flag()
+        if stored_uuid:
+            log.info("uuid сессии из .session_imported: %s (name=%r)", stored_uuid, stored_name)
+            sess = client.find_session_by_uuid(stored_uuid)
+            uuid = stored_uuid
+        else:
+            log.info("ищу сессию по имени %r (uuid в .session_imported не записан)", session_name)
+            sess = client.find_session_by_name(session_name)
+            uuid = sess.get("uuid")
+            if not uuid:
+                raise ApiError(f"в сессии {session_name!r} нет uuid: {sess}")
+        log.info("используем uuid=%s (name=%r)", uuid, sess.get("name"))
 
         pool = collect_url_pool()
         urls = pick_random_urls(pool, cfg)
