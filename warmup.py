@@ -375,34 +375,43 @@ def _get_clipboard_win32() -> str | None:
         user32.CloseClipboard()
 
 
-def _type_via_clipboard(text: str, hwnd: int | None = None) -> None:
-    """Вставляет текст в активный input через clipboard. Если clipboard
-    отказал (записалось не то / не записалось) — fallback на typewrite.
+def _slow_ctrl_v() -> None:
+    """Явный Ctrl+V с задержками между keyDown/keyUp — pyautogui.hotkey
+    отрабатывает почти мгновенно, и Electron-инпуты LS не успевают
+    обработать комбинацию. Явная последовательность с микро-паузами
+    надёжнее."""
+    pyautogui.keyDown("ctrl")
+    time.sleep(0.08)
+    pyautogui.keyDown("v")
+    time.sleep(0.05)
+    pyautogui.keyUp("v")
+    time.sleep(0.05)
+    pyautogui.keyUp("ctrl")
 
-    Если передан hwnd, перед Ctrl+V форсим окно в foreground — чтобы
-    случайно перебитый фокус не съел вставку."""
+
+def _type_via_clipboard(text: str, hwnd: int | None = None) -> None:
+    """Вставляет текст в текущий focused input через Win32 clipboard + Ctrl+V.
+    Перед Ctrl+V намеренно ничего не делаем с окном — фокус сейчас на поле
+    ввода (после click+Ctrl+A), и любой SetForegroundWindow/click сбросит
+    keyboard focus с input'а обратно на окно. Если clipboard не записался /
+    верификация не совпала — fallback на typewrite (спецсимволы @ ! могут
+    поехать на не-US раскладке, но это лучше чем ничего)."""
     if sys.platform != "win32":
         pyautogui.typewrite(text, interval=0.03)
         return
     ok = _set_clipboard_win32(text)
     if ok:
-        # верификация: то ли в clipboard'е, что мы клали
         got = _get_clipboard_win32()
         if got != text:
             log.warning("clipboard verify mismatch: got=%r len=%d ≠ %d",
-                        got[:20] if got else None, len(got or ""), len(text))
+                        (got or "")[:20], len(got or ""), len(text))
             ok = False
     if not ok:
-        log.warning("clipboard fallback на typewrite (Unicode/спецсимволы могут поехать)")
+        log.warning("clipboard fallback → typewrite")
         pyautogui.typewrite(text, interval=0.03)
         time.sleep(0.2)
         return
-    # форсим окно в foreground прямо перед Ctrl+V — на случай если
-    # за время clipboard-операций фокус куда-то ушёл
-    if hwnd:
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        time.sleep(0.1)
-    pyautogui.hotkey("ctrl", "v")
+    _slow_ctrl_v()
     time.sleep(0.3)
 
 
