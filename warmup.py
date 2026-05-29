@@ -1232,7 +1232,10 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("delete")
-    pyautogui.typewrite(file_path, interval=0.01)
+    # _type_via_clipboard использует SendInput Unicode — на той же скорости,
+    # что и pyautogui.typewrite interval=0.01, проглатывал буквы из пути,
+    # и Windows ругался «The file name is not valid».
+    _type_via_clipboard(file_path)
     time.sleep(0.3)
     pyautogui.press("enter")
     time.sleep(cfg.getfloat("matching", "step_delay"))
