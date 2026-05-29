@@ -322,9 +322,41 @@ def notify_ntfy(message: str, title: str = "warmup failed") -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
+def _configure_clipboard_signatures() -> None:
+    """Выставляет argtypes/restype для Win32 API.
+
+    КРИТИЧНО на 64-битной Windows: без явных restype ctypes считает,
+    что функция возвращает C `int` (32 бита), и для функций возвращающих
+    HANDLE/HGLOBAL/LPVOID (которые на x64 имеют ширину 64 бита) ctypes
+    обрезает верхние 32 бита. Указатель превращается в мусор/0 →
+    memmove(ptr, …) → access violation."""
+    if getattr(_configure_clipboard_signatures, "_done", False):
+        return
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    u32.OpenClipboard.restype = ctypes.c_int
+    u32.EmptyClipboard.restype = ctypes.c_int
+    u32.CloseClipboard.restype = ctypes.c_int
+    u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    u32.SetClipboardData.restype = ctypes.c_void_p
+    u32.GetClipboardData.argtypes = [ctypes.c_uint]
+    u32.GetClipboardData.restype = ctypes.c_void_p
+    k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    k32.GlobalAlloc.restype = ctypes.c_void_p
+    k32.GlobalLock.argtypes = [ctypes.c_void_p]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    k32.GlobalUnlock.restype = ctypes.c_int
+    k32.GlobalFree.argtypes = [ctypes.c_void_p]
+    k32.GlobalFree.restype = ctypes.c_void_p
+    _configure_clipboard_signatures._done = True
+
+
 def _set_clipboard_win32(text: str) -> bool:
     """Кладёт текст в Windows clipboard через ctypes — без spawn'а PowerShell
     (раньше дочерний процесс мог стащить фокус с LS, и Ctrl+V улетал не туда)."""
+    _configure_clipboard_signatures()
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     GMEM_MOVEABLE = 0x0002
@@ -337,17 +369,24 @@ def _set_clipboard_win32(text: str) -> bool:
         time.sleep(0.1)
     else:
         return False
+    h = None
     try:
         user32.EmptyClipboard()
         h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(buf))
         if not h:
             return False
         ptr = kernel32.GlobalLock(h)
+        if not ptr:
+            kernel32.GlobalFree(h)
+            return False
         ctypes.memmove(ptr, buf, len(buf))
         kernel32.GlobalUnlock(h)
         if not user32.SetClipboardData(CF_UNICODETEXT, h):
             kernel32.GlobalFree(h)
             return False
+        # после успешного SetClipboardData владелец памяти — система,
+        # GlobalFree больше не зовём.
+        h = None
         return True
     finally:
         user32.CloseClipboard()
@@ -355,6 +394,7 @@ def _set_clipboard_win32(text: str) -> bool:
 
 def _get_clipboard_win32() -> str | None:
     """Читает текст из clipboard для проверки, что Set прошёл."""
+    _configure_clipboard_signatures()
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     CF_UNICODETEXT = 13
