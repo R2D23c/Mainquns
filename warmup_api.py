@@ -36,7 +36,9 @@ LOG_FILE = ROOT / "warmup_api.log"
 CONFIG_PATH = ROOT / "config.ini"
 CREDS_PATH = ROOT / "credentials.ini"
 URLS_DIR = ROOT / "urls"
-# Флаг «сессия импортирована на этой машине», пишется UI-инсталляцией.
+# Имя сессии этой машины (CL-XXXXXXXX), пишется warmup.py при первой инсталляции.
+SESSION_NAME_FILE = ROOT / ".session_name"
+# Флаг «сессия импортирована», пишется warmup.py после UI-импорта.
 # Формат: «<uuid>\t<name>» (новый) либо просто «<name>» (старый — fallback).
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 
@@ -86,15 +88,25 @@ def load_credentials() -> configparser.ConfigParser:
     return creds
 
 
-def load_session_name(creds: configparser.ConfigParser) -> str:
-    if not creds.has_section("session"):
-        raise RuntimeError("В credentials.ini нет секции [session] name")
-    name = creds.get("session", "name", fallback="").strip()
-    if not name or name.lower() in ("session name", "your session name", "yourname"):
-        raise RuntimeError(
-            "В credentials.ini не задано [session] name — нечего прогревать"
-        )
-    return name
+def load_session_name() -> str:
+    """Имя сессии этой машины. Источники по приоритету:
+      1. .session_name (создаёт warmup.py на первом запуске)
+      2. .session_imported (миграция со старого формата — там было только имя)
+    Если ни одного — фейл: install не отработал."""
+    if SESSION_NAME_FILE.exists():
+        name = SESSION_NAME_FILE.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    if SESSION_IMPORTED_FLAG.exists():
+        raw = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
+        if raw:
+            # старый формат: только имя, либо новый — «<uuid>\t<name>»
+            _, _, name = raw.partition("\t")
+            return (name or raw).strip()
+    raise RuntimeError(
+        f"не найден ни .session_name, ни .session_imported — "
+        f"запусти install/run.bat хотя бы раз, чтобы инициализировать сессию."
+    )
 
 
 def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
@@ -321,7 +333,7 @@ def run() -> int:
     try:
         cfg = load_config()
         creds = load_credentials()
-        session_name = load_session_name(creds)
+        session_name = load_session_name()
         email = creds.get("account", "email").strip()
         password = creds.get("account", "password")
 

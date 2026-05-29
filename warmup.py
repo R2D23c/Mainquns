@@ -68,7 +68,10 @@ NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
 # чтобы убедиться, что setup отработал. Дальше — тишина (только при падениях).
 SUCCESS_NOTIFY_COUNT = 2
 SUCCESS_STATE_FILE = ROOT / ".warmup_state"
-# Флаг, что сессия уже импортирована на этой машине (хранит её имя).
+# Сгенерированное имя сессии этой машины (формат CL-XXXXXXXX, 8 цифр).
+# Создаётся один раз — на первой инсталляции — и больше не меняется.
+SESSION_NAME_FILE = ROOT / ".session_name"
+# Флаг, что сессия уже импортирована в LS на этой машине (хранит имя).
 # Первый запуск импортит xlsx из session_imports/, дальше только warmup.
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 SESSION_IMPORTS_DIR = ROOT / "session_imports"
@@ -1048,19 +1051,68 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
 
-def load_session_name() -> str | None:
-    """Имя сессии из credentials.ini [session] name. Оно же = имя xlsx-файла
-    в session_imports/ и поисковый запрос в Сфере. Хранится в credentials.ini
-    (gitignored), чтобы у каждой машины было своё и git pull его не трогал.
-    Возвращает None, если не задано — тогда импорт/поиск пропускаются (старое
-    поведение)."""
-    creds = load_credentials()
-    if not creds.has_section("session"):
-        return None
-    name = creds.get("session", "name", fallback="").strip()
-    if not name or name.lower() in ("session name", "your session name", "yourname"):
-        return None
+def _generate_session_name() -> str:
+    """CL-XXXXXXXX, 8 цифр. 10^8 возможных значений — для пары сотен VPS
+    вероятность пересечения <0.001%."""
+    return f"CL-{random.randint(10_000_000, 99_999_999)}"
+
+
+def load_session_name() -> str:
+    """Имя сессии этой машины. Источники, по приоритету:
+      1. .session_name (gitignored) — главный источник, генерируется автоматом
+         на первом запуске и больше не меняется.
+      2. .session_imported (старый формат «только имя») — миграция со старых
+         инсталляций, где имя жило там.
+      3. credentials.ini [session] name — миграция со ещё более старого
+         формата (когда юзер вписывал имя руками).
+      4. Если ничего нет — генерим новое CL-XXXXXXXX и пишем в .session_name.
+    Всегда возвращает непустую строку."""
+    if SESSION_NAME_FILE.exists():
+        name = SESSION_NAME_FILE.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    if SESSION_IMPORTED_FLAG.exists():
+        legacy = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
+        if legacy and "\t" not in legacy:
+            log.info("миграция: имя сессии %r из .session_imported → .session_name", legacy)
+            SESSION_NAME_FILE.write_text(legacy, encoding="utf-8")
+            return legacy
+    try:
+        creds = load_credentials()
+        if creds.has_section("session"):
+            legacy = creds.get("session", "name", fallback="").strip()
+            if legacy and legacy.lower() not in ("session name", "your session name", "yourname"):
+                log.info("миграция: имя сессии %r из credentials.ini → .session_name", legacy)
+                SESSION_NAME_FILE.write_text(legacy, encoding="utf-8")
+                return legacy
+    except FileNotFoundError:
+        pass
+    name = _generate_session_name()
+    SESSION_NAME_FILE.write_text(name, encoding="utf-8")
+    log.info("сгенерировано новое имя сессии: %s", name)
     return name
+
+
+def prepare_session_xlsx(session_name: str) -> Path:
+    """Если session_imports/<name>.xlsx уже есть — возвращаем путь.
+    Иначе клонируем session_imports/_template.xlsx, ставим A3 = session_name,
+    сохраняем под нужным именем. Возвращаем путь к готовому файлу."""
+    target = SESSION_IMPORTS_DIR / f"{session_name}.xlsx"
+    if target.exists():
+        return target
+    template = SESSION_IMPORTS_DIR / "_template.xlsx"
+    if not template.exists():
+        raise FileNotFoundError(
+            f"не найден шаблон импорта сессии: {template}. "
+            f"Должен лежать в репозитории."
+        )
+    import openpyxl  # ленивый импорт — нужен только при первой установке
+    wb = openpyxl.load_workbook(template)
+    ws = wb[wb.sheetnames[0]]
+    ws["A3"] = session_name
+    wb.save(target)
+    log.info("создан xlsx сессии: %s (A3=%s)", target, session_name)
+    return target
 
 
 def _click_import_browse_file(cfg: configparser.ConfigParser) -> None:
@@ -1094,12 +1146,7 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) 
             return
         log.info("в флаге другое имя (%r != %r) — импортирую заново", prev, session_name)
 
-    xlsx = SESSION_IMPORTS_DIR / f"{session_name}.xlsx"
-    if not xlsx.exists():
-        raise FileNotFoundError(
-            f"не найден файл импорта сессии: {xlsx}. "
-            f"проверь [session] name в credentials.ini и наличие файла в session_imports/"
-        )
+    xlsx = prepare_session_xlsx(session_name)
 
     shots = cfg.getboolean("logging", "screenshots")
     log.info("импорт сессии %r из %s", session_name, xlsx)
@@ -1159,15 +1206,15 @@ def run() -> int:
 
         screenshot("00_initial", shots)
 
-        # 0.7 Сессия по имени (если задано [session] name в credentials.ini):
-        #     первый запуск — импорт xlsx, затем поиск по имени, чтобы three_dots
-        #     был однозначным. Если имя не задано — старое поведение (пропуск).
+        # 0.7 Сессия машины: уникальное имя CL-XXXXXXXX генерится один раз
+        #     и хранится в .session_name. Первый запуск — клонируем шаблон
+        #     xlsx с этим именем + импорт в LS, затем поиск по имени, чтобы
+        #     three_dots был однозначным.
         session_name = load_session_name()
-        if session_name:
-            import_session_if_needed(cfg, session_name)
-            search_session(cfg, session_name)
-            # подстраховка перед three_dots: закрыть firewall, если всплыл
-            _dismiss_firewall_alert()
+        import_session_if_needed(cfg, session_name)
+        search_session(cfg, session_name)
+        # подстраховка перед three_dots: закрыть firewall, если всплыл
+        _dismiss_firewall_alert()
 
         # 1. меню "три точки"
         click("three_dots", cfg)

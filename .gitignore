@@ -8,5 +8,7 @@ venv/
 credentials.ini
 .warmup_state
 .session_imported
+.session_name
 .api_activated
 warmup_api.log
+session_imports/CL-*.xlsx
