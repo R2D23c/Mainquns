@@ -322,25 +322,88 @@ def notify_ntfy(message: str, title: str = "warmup failed") -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
-def _type_via_clipboard(text: str) -> None:
-    """Вставляет текст через буфер обмена (работает с @, ! и любыми Unicode символами)."""
+def _set_clipboard_win32(text: str) -> bool:
+    """Кладёт текст в Windows clipboard через ctypes — без spawn'а PowerShell
+    (раньше дочерний процесс мог стащить фокус с LS, и Ctrl+V улетал не туда)."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    GMEM_MOVEABLE = 0x0002
+    CF_UNICODETEXT = 13
+    buf = (text + "\0").encode("utf-16-le")
+    # 5 попыток — clipboard может быть кем-то открыт (антивирус, другой процесс)
+    for _ in range(5):
+        if user32.OpenClipboard(0):
+            break
+        time.sleep(0.1)
+    else:
+        return False
+    try:
+        user32.EmptyClipboard()
+        h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(buf))
+        if not h:
+            return False
+        ptr = kernel32.GlobalLock(h)
+        ctypes.memmove(ptr, buf, len(buf))
+        kernel32.GlobalUnlock(h)
+        if not user32.SetClipboardData(CF_UNICODETEXT, h):
+            kernel32.GlobalFree(h)
+            return False
+        return True
+    finally:
+        user32.CloseClipboard()
+
+
+def _get_clipboard_win32() -> str | None:
+    """Читает текст из clipboard для проверки, что Set прошёл."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    CF_UNICODETEXT = 13
+    if not user32.OpenClipboard(0):
+        return None
+    try:
+        h = user32.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return None
+        ptr = kernel32.GlobalLock(h)
+        if not ptr:
+            return None
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(h)
+    finally:
+        user32.CloseClipboard()
+
+
+def _type_via_clipboard(text: str, hwnd: int | None = None) -> None:
+    """Вставляет текст в активный input через clipboard. Если clipboard
+    отказал (записалось не то / не записалось) — fallback на typewrite.
+
+    Если передан hwnd, перед Ctrl+V форсим окно в foreground — чтобы
+    случайно перебитый фокус не съел вставку."""
     if sys.platform != "win32":
         pyautogui.typewrite(text, interval=0.03)
         return
-    import base64
-    b64 = base64.b64encode(text.encode("utf-8")).decode()
-    ps_cmd = (
-        "Set-Clipboard "
-        "([System.Text.Encoding]::UTF8.GetString("
-        f"[System.Convert]::FromBase64String('{b64}')))"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-        capture_output=True,
-        timeout=10,
-    )
+    ok = _set_clipboard_win32(text)
+    if ok:
+        # верификация: то ли в clipboard'е, что мы клали
+        got = _get_clipboard_win32()
+        if got != text:
+            log.warning("clipboard verify mismatch: got=%r len=%d ≠ %d",
+                        got[:20] if got else None, len(got or ""), len(text))
+            ok = False
+    if not ok:
+        log.warning("clipboard fallback на typewrite (Unicode/спецсимволы могут поехать)")
+        pyautogui.typewrite(text, interval=0.03)
+        time.sleep(0.2)
+        return
+    # форсим окно в foreground прямо перед Ctrl+V — на случай если
+    # за время clipboard-операций фокус куда-то ушёл
+    if hwnd:
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        time.sleep(0.1)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.2)
+    time.sleep(0.3)
 
 
 class _RECT(ctypes.Structure):
@@ -800,13 +863,13 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     pyautogui.click(cx, email_y)
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
-    _type_via_clipboard(creds.get("account", "email"))
+    _type_via_clipboard(creds.get("account", "email"), hwnd=hwnd)
 
     _record_click(cx, password_y, "password")
     pyautogui.click(cx, password_y)
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
-    _type_via_clipboard(creds.get("account", "password"))
+    _type_via_clipboard(creds.get("account", "password"), hwnd=hwnd)
 
     screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
 
