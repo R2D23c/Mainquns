@@ -389,7 +389,7 @@ def _slow_ctrl_v() -> None:
     pyautogui.keyUp("ctrl")
 
 
-def _type_via_clipboard(text: str, hwnd: int | None = None) -> None:
+def _type_via_clipboard(text: str) -> None:
     """Вставляет текст в текущий focused input через Win32 clipboard + Ctrl+V.
     Перед Ctrl+V намеренно ничего не делаем с окном — фокус сейчас на поле
     ввода (после click+Ctrl+A), и любой SetForegroundWindow/click сбросит
@@ -872,13 +872,13 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     pyautogui.click(cx, email_y)
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
-    _type_via_clipboard(creds.get("account", "email"), hwnd=hwnd)
+    _type_via_clipboard(creds.get("account", "email"))
 
     _record_click(cx, password_y, "password")
     pyautogui.click(cx, password_y)
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
-    _type_via_clipboard(creds.get("account", "password"), hwnd=hwnd)
+    _type_via_clipboard(creds.get("account", "password"))
 
     screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
 
