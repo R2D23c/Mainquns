@@ -1000,7 +1000,7 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     _record_click(cx, signin_y, "sign_in")
     pyautogui.click(cx, signin_y)
     log.info("нажат SIGN IN, жду главный экран…")
-    time.sleep(3.0)
+    time.sleep(5.0)  # сетевая сторона signin на слабом VPS отзывается с лагом
 
     # После SIGN IN ждём three_dots, но параллельно чистим всплывающие диалоги
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
@@ -1225,11 +1225,11 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     Нативный Windows-диалог открытия файла.
     Самый надёжный способ — вставить полный путь в поле "Имя файла" и нажать Enter.
     """
-    time.sleep(1.2)  # дать диалогу открыться
+    time.sleep(3.0)  # нативный диалог Windows на 2-ядерном VPS отрисовывается дольше
     screenshot("06_open_dialog", cfg.getboolean("logging", "screenshots"))
     # focus на поле "File name" — стандартно открыто по умолчанию
     pyautogui.hotkey("alt", "n")  # Alt+N → File name (en)
-    time.sleep(0.3)
+    time.sleep(0.5)
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("delete")
     # _type_via_clipboard использует SendInput Unicode — на той же скорости,
@@ -1371,11 +1371,11 @@ def search_session(cfg: configparser.ConfigParser, session_name: str) -> None:
     остаётся одна строка, three_dots на ней будет однозначным."""
     log.info("поиск сессии по имени: %r", session_name)
     pyautogui.hotkey("ctrl", "f")
-    time.sleep(0.6)
+    time.sleep(1.2)  # поле поиска появляется не мгновенно на слабом UI
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("delete")
     _type_via_clipboard(session_name)
-    time.sleep(1.5)  # дать списку отфильтроваться
+    time.sleep(2.5)  # фильтрация списка на 2-ядерном VPS заметно медленнее
     screenshot("D4_searched", cfg.getboolean("logging", "screenshots"))
 
 
