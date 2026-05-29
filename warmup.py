@@ -415,44 +415,119 @@ def _get_clipboard_win32() -> str | None:
         user32.CloseClipboard()
 
 
-def _slow_ctrl_v() -> None:
-    """Явный Ctrl+V с задержками между keyDown/keyUp — pyautogui.hotkey
-    отрабатывает почти мгновенно, и Electron-инпуты LS не успевают
-    обработать комбинацию. Явная последовательность с микро-паузами
-    надёжнее."""
-    pyautogui.keyDown("ctrl")
-    time.sleep(0.08)
-    pyautogui.keyDown("v")
-    time.sleep(0.05)
-    pyautogui.keyUp("v")
-    time.sleep(0.05)
-    pyautogui.keyUp("ctrl")
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_ulong),
+        ("wParamL", ctypes.c_ushort),
+        ("wParamH", ctypes.c_ushort),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("u", _INPUT_UNION)]
+
+
+def _send_unicode_to_focused(text: str) -> bool:
+    """Шлёт строку через SendInput с KEYEVENTF_UNICODE — каждый символ
+    как Unicode-код в текущее focused окно, минуя клавиатурную раскладку
+    И минуя Ctrl+V (т.е. нет проблем с тем, что shortcut не докатывается
+    до Electron-инпута). Работает на любой language pack Windows.
+
+    ВАЖНО: символы летят в то окно, где сейчас keyboard focus. Перед
+    вызовом надо убедиться, что нужный input в фокусе (клик + sleep).
+    Возвращает True если SendInput отправил все коды, False если ОС
+    отвергла часть."""
+    if sys.platform != "win32":
+        return False
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int]
+    user32.SendInput.restype = ctypes.c_uint
+
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_UNICODE = 0x0004
+
+    # Каждый символ — два события (KEYDOWN + KEYUP), wScan = код-поинт.
+    # BMP-символы (≤ 0xFFFF) шлём как один scan. Если бы были эмодзи
+    # (> 0xFFFF) — нужно было бы surrogate pair; в email/password их нет.
+    events: list[_INPUT] = []
+    for ch in text:
+        code = ord(ch)
+        if code > 0xFFFF:
+            # surrogate pair
+            code -= 0x10000
+            high = 0xD800 | (code >> 10)
+            low = 0xDC00 | (code & 0x3FF)
+            chars = [high, low]
+        else:
+            chars = [code]
+        for scan in chars:
+            for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
+                inp = _INPUT()
+                inp.type = INPUT_KEYBOARD
+                inp.u.ki.wVk = 0
+                inp.u.ki.wScan = scan
+                inp.u.ki.dwFlags = flags
+                inp.u.ki.time = 0
+                inp.u.ki.dwExtraInfo = None
+                events.append(inp)
+
+    arr = (_INPUT * len(events))(*events)
+    sent = user32.SendInput(len(events), arr, ctypes.sizeof(_INPUT))
+    if sent != len(events):
+        log.warning("SendInput отправил %d из %d событий", sent, len(events))
+        return False
+    return True
 
 
 def _type_via_clipboard(text: str) -> None:
-    """Вставляет текст в текущий focused input через Win32 clipboard + Ctrl+V.
-    Перед Ctrl+V намеренно ничего не делаем с окном — фокус сейчас на поле
-    ввода (после click+Ctrl+A), и любой SetForegroundWindow/click сбросит
-    keyboard focus с input'а обратно на окно. Если clipboard не записался /
-    верификация не совпала — fallback на typewrite (спецсимволы @ ! могут
-    поехать на не-US раскладке, но это лучше чем ничего)."""
+    """Вводит текст в текущий focused input.
+
+    Главный путь — SendInput с KEYEVENTF_UNICODE: символы летят как
+    Unicode-коды напрямую, нет Ctrl+V (не надо, чтобы шорткат докатился
+    до Electron-input'а), нет зависимости от клавиатурной раскладки.
+
+    Параллельно кладём текст и в clipboard — как safety net: если
+    SendInput тоже промахнулся (поле не в фокусе), юзер сможет
+    руками кликнуть в input и Ctrl+V. Данные уже в буфере."""
     if sys.platform != "win32":
         pyautogui.typewrite(text, interval=0.03)
         return
-    ok = _set_clipboard_win32(text)
-    if ok:
-        got = _get_clipboard_win32()
-        if got != text:
-            log.warning("clipboard verify mismatch: got=%r len=%d ≠ %d",
-                        (got or "")[:20], len(got or ""), len(text))
-            ok = False
-    if not ok:
-        log.warning("clipboard fallback → typewrite")
-        pyautogui.typewrite(text, interval=0.03)
-        time.sleep(0.2)
+    # safety net: clipboard
+    _set_clipboard_win32(text)
+    # главный путь: SendInput Unicode
+    if _send_unicode_to_focused(text):
+        time.sleep(0.3)
         return
-    _slow_ctrl_v()
-    time.sleep(0.3)
+    # последний шанс: typewrite (зависит от раскладки, но лучше чем ничего)
+    log.warning("SendInput Unicode failed → fallback typewrite")
+    pyautogui.typewrite(text, interval=0.03)
+    time.sleep(0.2)
 
 
 class _RECT(ctypes.Structure):
