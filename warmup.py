@@ -71,6 +71,9 @@ SUCCESS_STATE_FILE = ROOT / ".warmup_state"
 # Сгенерированное имя сессии этой машины (формат CL-XXXXXXXX, 8 цифр).
 # Создаётся один раз — на первой инсталляции — и больше не меняется.
 SESSION_NAME_FILE = ROOT / ".session_name"
+# Флаг, что в LS активирован API-порт (Settings → Network → Api port).
+# Если флаг есть — UI-активацию пропускаем, дальше всё через HTTP.
+API_ACTIVATED_FLAG = ROOT / ".api_activated"
 # Флаг, что сессия уже импортирована в LS на этой машине (хранит имя).
 # Первый запуск импортит xlsx из session_imports/, дальше только warmup.
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
@@ -1326,6 +1329,129 @@ def _click_import_browse_file(cfg: configparser.ConfigParser) -> None:
     raise TimeoutError("BROWSE FILE (правая, XLSX) не найдена в правой половине экрана")
 
 
+def _check_api_port_alive(base_url: str) -> bool:
+    """Пинг локального LS API — пробуем GET /sessions. 4xx/5xx ок (порт жив),
+    сеть/таймаут → порт не открыт."""
+    import urllib.request, urllib.error
+    try:
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/sessions", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _parse_api_port_from_config(cfg: configparser.ConfigParser) -> tuple[str, int]:
+    """Тянет base_url из config.ini [api] и вытаскивает оттуда порт.
+    Возвращает (base_url, port)."""
+    base_url = cfg.get("api", "base_url", fallback="http://127.0.0.1:36555").rstrip("/")
+    # base_url вида http://host:port — порт после последнего двоеточия
+    try:
+        port = int(base_url.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        port = 36555
+    return base_url, port
+
+
+def activate_api_port_if_needed(cfg: configparser.ConfigParser) -> None:
+    """Одноразово на машине: открывает Settings → прокручивает вниз →
+    вписывает API-порт → Enter → Esc. После успешного пинга API пишет
+    флаг .api_activated, дальше пропускает.
+
+    Защитный dismiss-loop в начале — на случай, если после login_if_needed
+    всплыл get_started/get_started2/skip/firewall, который ещё не успели
+    закрыть."""
+    if API_ACTIVATED_FLAG.exists():
+        log.info("API-порт уже активирован ранее — пропуск")
+        return
+
+    base_url, port = _parse_api_port_from_config(cfg)
+
+    # Быстрая проверка: вдруг порт уже активирован руками — не надо лезть в UI.
+    if _check_api_port_alive(base_url):
+        log.info("API на %s уже отвечает — ставим флаг без UI-активации", base_url)
+        API_ACTIVATED_FLAG.write_text(str(port), encoding="utf-8")
+        return
+
+    log.info("активирую API-порт %d через UI", port)
+    shots = cfg.getboolean("logging", "screenshots")
+
+    # 1. Закрыть всё что могло всплыть после логина (wizard / firewall).
+    for _ in range(10):
+        did = False
+        if _dismiss_firewall_alert():
+            did = True
+        if _dismiss_customize_wizard_step():
+            did = True
+        if not did:
+            break
+
+    # 2. Клик на settings_gear (маленькая шестерёнка слева вверху LS).
+    click("settings_gear", cfg)
+    screenshot("A1_preferences_open", shots)
+
+    # 3. Скроллим к самому низу страницы Preferences — поле Api port внизу.
+    #    Сначала клик в центр области Preferences, чтобы скролл-фокус
+    #    точно был на содержимом, а не на каком-нибудь баннере.
+    sw = ctypes.windll.user32.GetSystemMetrics(0)
+    sh = ctypes.windll.user32.GetSystemMetrics(1)
+    pyautogui.click(sw // 2, sh // 2)
+    time.sleep(0.5)
+    # Несколько Ctrl+End — Electron иногда обрабатывает только первый.
+    for _ in range(3):
+        pyautogui.hotkey("ctrl", "end")
+        time.sleep(0.6)
+    # Дополнительно PgDn много раз — на случай если Ctrl+End не сработал.
+    for _ in range(15):
+        pyautogui.press("pagedown")
+        time.sleep(0.15)
+    time.sleep(1.0)
+    screenshot("A2_scrolled_to_api_port", shots)
+
+    # 4. Найти api_port_field (строка «Api port» + input справа).
+    #    Кликаем в правую часть найденного бокса — там input.
+    box = _find_template_box("api_port_field", cfg)
+    field_left, field_top, field_w, field_h = box
+    click_x = field_left + int(field_w * 0.80)   # ~80% по ширине — гарантированно в input
+    click_y = field_top + field_h // 2
+    log.info("Api port input @(%d,%d) box=%dx%d", click_x, click_y, field_w, field_h)
+    _record_click(click_x, click_y, "api_port_input")
+    pyautogui.click(click_x, click_y)
+    time.sleep(0.5)
+
+    # 5. Очистить (вдруг там уже что-то по дефолту) и вписать порт.
+    pyautogui.hotkey("ctrl", "a")
+    time.sleep(0.2)
+    pyautogui.press("delete")
+    time.sleep(0.2)
+    _type_via_clipboard(str(port))
+    time.sleep(0.5)
+    screenshot("A3_port_typed", shots)
+
+    # 6. Enter — подтвердить значение.
+    pyautogui.press("enter")
+    time.sleep(1.0)
+
+    # 7. Esc — выйти из Preferences обратно на список сессий.
+    pyautogui.press("escape")
+    time.sleep(1.5)
+    screenshot("A4_back_to_main", shots)
+
+    # 8. Сanity: API теперь должен отвечать. Иначе флаг не ставим.
+    if not _check_api_port_alive(base_url):
+        raise RuntimeError(
+            f"API-порт {port} вписан, Enter нажат, Esc нажат — но {base_url} "
+            f"не отвечает. Скорее всего LS не сохранила порт. Проверь "
+            f"скриншоты A1-A4 в screenshots/."
+        )
+
+    API_ACTIVATED_FLAG.write_text(str(port), encoding="utf-8")
+    log.info("API-порт %d активирован, флаг записан", port)
+
+
 def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) -> None:
     """Первый запуск на машине: импортит сессию из session_imports/<name>.xlsx
     через MULTIPLE → BROWSE FILE (правая) → диалог → IMPORT. Дальше пропускается."""
@@ -1395,6 +1521,12 @@ def run() -> int:
         login_if_needed(cfg)
 
         screenshot("00_initial", shots)
+
+        # 0.6 Активировать API-порт LS (Settings → Network → Api port).
+        #     Одноразово на машине. После — все прогревы через HTTP API,
+        #     UI больше не дёргаем. activate_api_port_if_needed сам
+        #     дисмиссит wizard/firewall если что-то всплыло после логина.
+        activate_api_port_if_needed(cfg)
 
         # 0.7 Сессия машины: уникальное имя CL-XXXXXXXX генерится один раз
         #     и хранится в .session_name. Первый запуск — клонируем шаблон
