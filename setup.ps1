@@ -39,7 +39,7 @@ function Install-Git {
         winget install -e --id Git.Git --silent --accept-source-agreements --accept-package-agreements --scope machine
     } else {
         Write-Step "winget not available — downloading Git installer directly..."
-        $url = "https://github.com/git-for-windows/git/releases/download/v2.46.0.windows.1/Git-2.46.0-64-bit.exe"
+        $url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
         $tmp = Join-Path $env:TEMP "git-installer.exe"
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
         Write-Step "Running Git installer silently (1-2 min)..."
