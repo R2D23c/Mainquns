@@ -95,14 +95,11 @@ if not exist "%~dp0credentials.ini" (
     echo [OK] credentials.ini уже существует.
 )
 
-REM --- config.ini ---
-echo.
-echo Проверь пути в config.ini (папка с .txt файлами и путь к Linken Sphere 2):
-notepad "%~dp0config.ini"
-
 echo.
 echo Установка завершена.
-echo Для запуска по расписанию (раз в час) запусти schedule_hourly.bat от имени администратора.
+echo Дальше: запусти schedule_hourly.bat (от админа) и можешь уходить от компа.
+echo Первый автоматический триггер сам сделает login + активацию API-порта +
+echo импорт сессии в Linken Sphere. Следующие — чанковый прогрев через API.
 pause
 exit /b 0
 
