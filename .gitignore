@@ -12,3 +12,4 @@ credentials.ini
 .api_activated
 warmup_api.log
 session_imports/CL-*.xlsx
+urls_generated/
