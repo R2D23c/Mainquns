@@ -1568,11 +1568,24 @@ def run() -> int:
         click("start_button", cfg)
         screenshot("08_started", shots)
 
-        # 7.5. После START браузеры начинают ходить по URL'ам — Windows может
-        # снова показать firewall alert на разрешение сетевого доступа. Иногда
-        # он всплывает не сразу, а через минуту, поэтому окно ожидания 90с.
-        # Если alert появился и был закрыт — выходим раньше (без полного ожидания).
-        _wait_for_firewall_alert(90.0, exit_after_close=True)
+        # 7.5. После START LS греет URL'ы ~40 минут — Windows может в любой
+        # момент показать firewall alert. Запускаем фоновый watcher-процесс,
+        # который дисмиссит firewall каждые 15с. Ждём примерно столько же,
+        # сколько длится прогрев (100 URL × ~25с = ~42 мин, берём с запасом).
+        warmup_seconds = cfg.getint("warmup", "time_per_url", fallback=7) * 100 * 4
+        log.info("watcher firewall на %dс (длительность прогрева + запас)", warmup_seconds)
+        fw_proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(warmup_seconds)
+        finally:
+            fw_proc.terminate()
+            try:
+                fw_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fw_proc.kill()
 
         # 8. temp-файл с URL'ами больше не нужен — удаляем
         try:

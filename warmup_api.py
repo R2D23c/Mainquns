@@ -232,9 +232,20 @@ class ApiClient:
 
     def signin(self, email: str, password: str) -> None:
         """Логинит LS-приложение в аккаунт. Авторизация дальше держится
-        самим процессом LS — отдельных Bearer-токенов в API нет (см. дока)."""
-        self._request("POST", ENDPOINTS["signin"], {"email": email, "password": password})
-        log.info("signin OK")
+        самим процессом LS — отдельных Bearer-токенов в API нет (см. дока).
+
+        ВАЖНО: после первого успешного signin последующие вызовы возвращают
+        HTTP 400 {"error":"Already signed in"} — это НЕ ошибка, это норма
+        для LS API. Глотаем такое и идём дальше."""
+        try:
+            self._request("POST", ENDPOINTS["signin"], {"email": email, "password": password})
+            log.info("signin OK")
+        except ApiError as e:
+            msg = str(e)
+            if "Already signed in" in msg or "already signed in" in msg.lower():
+                log.info("signin: already signed in (LS app keeps session) — OK")
+                return
+            raise
 
     def list_sessions(self) -> list[dict]:
         out = self._request("GET", ENDPOINTS["sessions"])
@@ -383,7 +394,24 @@ def run() -> int:
 
         t_start = time.time()
         client.start_warmup(uuid, urls, view_depth, time_per_url)
-        ok = wait_for_warmup_done(client, uuid, cfg)
+
+        # Во время прогрева (~40 мин) Windows может в любой момент показать
+        # firewall alert. Спавним фоновый watcher, который дисмиссит его
+        # каждые 15 секунд, пока идёт wait_for_warmup_done. Он не зависит
+        # от нашего поллинга API и работает параллельно.
+        import subprocess
+        fw_proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            ok = wait_for_warmup_done(client, uuid, cfg)
+        finally:
+            fw_proc.terminate()
+            try:
+                fw_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fw_proc.kill()
         if not ok:
             log.warning("прогрев не подтверждён поллингом (status неясен)")
         elapsed = time.time() - t_start
