@@ -203,12 +203,18 @@ class ApiClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
-            body_text = ""
+            body_full = ""
             try:
-                body_text = e.read().decode("utf-8", errors="ignore")[:2000]
+                body_full = e.read().decode("utf-8", errors="ignore")
             except Exception:
                 pass
-            raise ApiError(f"{method} {path} → HTTP {e.code}: {body_text}") from e
+            # Полный текст ответа всегда в логе — там можем grep'нуть валидатор
+            log.error("HTTP %d on %s %s — full body (%d chars): %s",
+                      e.code, method, path, len(body_full), body_full)
+            # В исключение (и в ntfy) — хвост: валидатор пишет причину ПОСЛЕ
+            # того как зеркалит наш запрос обратно, поэтому начало нам не нужно.
+            short = body_full[-1500:] if len(body_full) > 1500 else body_full
+            raise ApiError(f"{method} {path} → HTTP {e.code}: {short}") from e
         except (urllib.error.URLError, socket.timeout, OSError) as e:
             raise ApiError(f"{method} {path} → сеть/таймаут: {e}") from e
         if not raw:
