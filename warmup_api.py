@@ -205,7 +205,7 @@ class ApiClient:
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="ignore")[:500]
+                body_text = e.read().decode("utf-8", errors="ignore")[:2000]
             except Exception:
                 pass
             raise ApiError(f"{method} {path} → HTTP {e.code}: {body_text}") from e
