@@ -1390,7 +1390,37 @@ def activate_api_port_if_needed(cfg: configparser.ConfigParser) -> None:
             break
 
     # 2. Клик на settings_gear (маленькая шестерёнка слева вверху LS).
-    click("settings_gear", cfg)
+    #    Шаблон 32×28 — слишком мелкий, чтобы безопасно искать по всему
+    #    экрану (любая чёрная иконка в браузере/трее может сматчиться).
+    #    Ограничиваем регион верхним-левым углом окна LS.
+    ls_hwnd = _find_ls_window()
+    conf = cfg.getfloat("matching", "confidence")
+    timeout = cfg.getfloat("matching", "wait_seconds")
+    pt = None
+    if ls_hwnd:
+        rect = _RECT()
+        ctypes.windll.user32.GetWindowRect(ls_hwnd, ctypes.byref(rect))
+        # шестерёнка живёт в шапке LS — слева, в первых ~250×120 пикселях
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pt = _match_template_in_region(
+                "settings_gear", conf,
+                rect.left, rect.top, rect.left + 260, rect.top + 130,
+            )
+            if pt is not None:
+                break
+            time.sleep(0.5)
+    if pt is None:
+        # fallback — попробуем full-screen матч (если LS hwnd не найден или
+        # шапка нестандартная); confidence уже 0.80, риск false positive есть,
+        # но это последняя надежда.
+        log.warning("settings_gear не нашли в шапке LS, пробуем по всему экрану")
+        click("settings_gear", cfg)
+    else:
+        log.info("settings_gear @(%d,%d)", *pt)
+        _record_click(pt[0], pt[1], "settings_gear")
+        pyautogui.click(pt[0], pt[1])
+        time.sleep(cfg.getfloat("matching", "step_delay"))
     screenshot("A1_preferences_open", shots)
 
     # 3. Скроллим к самому низу страницы Preferences — поле Api port внизу.
