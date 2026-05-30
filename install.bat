@@ -1,39 +1,39 @@
 @echo off
 chcp 65001 >nul
-REM Установка зависимостей для warmup.py.
-REM Предпочитает Python 3.12 (стабильный, все wheel-файлы доступны).
+REM Install Python dependencies for warmup.py + Linken Sphere 2 + credentials.ini.
+REM Prefers Python 3.12 (stable, all wheels available).
 
 setlocal enabledelayedexpansion
 
-REM 1) пробуем py -3.12
+REM 1) try py -3.12
 py -3.12 --version >nul 2>&1
 if not errorlevel 1 goto use_py312
 
-REM 2) пробуем любую py-3
+REM 2) try any py -3
 py -3 --version >nul 2>&1
 if not errorlevel 1 goto use_py3
 
-REM 3) fallback: python из PATH
+REM 3) fallback: python from PATH
 where python >nul 2>&1
 if errorlevel 1 goto no_python
 set "PY=python"
-echo Использую python из PATH.
-echo [WARN] Рекомендуется Python 3.12.
+echo Using python from PATH.
+echo [WARN] Python 3.12 is recommended.
 goto run_install
 
 :use_py312
 set "PY=py -3.12"
-echo Использую Python 3.12 через py launcher.
+echo Using Python 3.12 via py launcher.
 goto run_install
 
 :use_py3
 set "PY=py -3"
-echo Использую py launcher любой версии Python 3.
-echo [WARN] Рекомендуется именно 3.12. Если упадёт - поставь 3.12 с python.org.
+echo Using py launcher (any Python 3).
+echo [WARN] Python 3.12 is recommended. If pip fails - install 3.12 from python.org.
 goto run_install
 
 :no_python
-echo [ERROR] Python не найден. Поставь Python 3.12 с https://python.org/downloads/ и отметь Add to PATH.
+echo [ERROR] Python not found. Install Python 3.12 from https://python.org/downloads/ and check 'Add to PATH'.
 pause
 exit /b 1
 
@@ -45,43 +45,43 @@ if errorlevel 1 goto install_failed
 
 echo %PY%> "%~dp0.python_cmd"
 echo.
-echo [OK] зависимости установлены через %PY%.
+echo [OK] dependencies installed via %PY%.
 
 REM --- Linken Sphere 2 ---
 set "LS_PATH=C:\Program Files (x86)\Linken Sphere 2\Linken Sphere 2.exe"
 if exist "%LS_PATH%" (
-    echo [OK] Linken Sphere 2 уже установлен.
+    echo [OK] Linken Sphere 2 already installed.
     goto :after_ls
 )
 
 echo.
-echo Linken Sphere 2 не найден, скачиваю установщик (~150 MB)...
+echo Linken Sphere 2 not found, downloading installer (~150 MB)...
 set "LS_INSTALLER=%TEMP%\LinkenSphere2Setup.exe"
 powershell -NoProfile -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://cdn.ls.app/Linken%%20Sphere%%202%%20Setup.exe' -OutFile '%LS_INSTALLER%' -UseBasicParsing"
 if errorlevel 1 (
-    echo [ERROR] Не удалось скачать Linken Sphere 2.
+    echo [ERROR] Failed to download Linken Sphere 2.
     pause
     exit /b 1
 )
 
-echo Запускаю установщик в тихом режиме...
-REM Inno Setup: /VERYSILENT = без UI, /SUPPRESSMSGBOXES = автопринятие EULA,
-REM /NORESTART = не перезагружать систему. Установка для всех (нужны права админа).
+echo Running installer silently...
+REM Inno Setup: /VERYSILENT = no UI, /SUPPRESSMSGBOXES = auto-accept EULA,
+REM /NORESTART = do not reboot. Installs for all users (admin required).
 start /wait "" "%LS_INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 
-echo Жду появления .exe (до 90 секунд)...
+echo Waiting for .exe to appear (up to 90 seconds)...
 set /a "WAITED=0"
 :wait_install
 if exist "%LS_PATH%" goto :install_done
 timeout /t 3 /nobreak >nul
 set /a "WAITED+=3"
 if %WAITED% LSS 90 goto :wait_install
-echo [WARN] За 90 секунд установка не завершилась.
-echo Запусти установщик вручную: %LS_INSTALLER%
-echo или впиши свой путь в config.ini -^> startup.linken_sphere_path
+echo [WARN] Installer did not finish within 90 seconds.
+echo Run it manually: %LS_INSTALLER%
+echo Or set your path in config.ini -^> startup.linken_sphere_path
 goto :after_ls
 :install_done
-echo [OK] Linken Sphere 2 установлен в "%LS_PATH%"
+echo [OK] Linken Sphere 2 installed at "%LS_PATH%"
 del /q "%LS_INSTALLER%" 2>nul
 :after_ls
 
@@ -89,25 +89,25 @@ REM --- credentials.ini ---
 if not exist "%~dp0credentials.ini" (
     copy "%~dp0credentials.ini.example" "%~dp0credentials.ini" >nul
     echo.
-    echo [!] Создан credentials.ini — впиши свои email и пароль от Linken Sphere 2.
+    echo [!] credentials.ini created - enter your Linken Sphere 2 email and password.
     notepad "%~dp0credentials.ini"
 ) else (
-    echo [OK] credentials.ini уже существует.
+    echo [OK] credentials.ini already exists.
 )
 
 echo.
-echo Установка завершена.
-echo Дальше: запусти schedule_hourly.bat (от админа) и можешь уходить от компа.
-echo Первый автоматический триггер сам сделает login + активацию API-порта +
-echo импорт сессии в Linken Sphere. Следующие — чанковый прогрев через API.
+echo Install complete.
+echo Next: run schedule_hourly.bat (as admin) and walk away.
+echo First scheduled trigger does login + API port activation + session import.
+echo Subsequent triggers - chunked API warmup.
 pause
 exit /b 0
 
 :install_failed
 echo.
-echo [ERROR] Не удалось установить зависимости.
-echo Скорее всего у тебя слишком новый Python 3.14+, под который opencv-python ещё не собран.
-echo Поставь Python 3.12 с https://python.org/downloads/release/python-3127/
-echo при установке отметь Add Python to PATH и запусти install.bat заново.
+echo [ERROR] Failed to install dependencies.
+echo Most likely Python 3.14+ which has no opencv-python wheel yet.
+echo Install Python 3.12 from https://python.org/downloads/release/python-3127/
+echo (check 'Add Python to PATH') and re-run install.bat.
 pause
 exit /b 1

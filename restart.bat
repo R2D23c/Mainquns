@@ -2,26 +2,26 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-REM Полная очистка состояния этой машины для отладки с нуля.
+REM Full state reset for debugging from scratch.
 REM
-REM Что удаляет:
-REM   .session_name        — сгенерированное имя сессии CL-XXXXXXXX
-REM   .session_imported    — флаг «xlsx уже импортирован в LS»
-REM   .api_activated       — флаг «API-порт активирован в LS»
-REM   .warmup_state        — счётчик первых успешных push-уведомлений
-REM   session_imports\CL-*.xlsx — клон шаблона с уникальным именем
-REM   screenshots\         — все скриншоты прошлых запусков
+REM Deletes:
+REM   .session_name        - generated session name CL-XXXXXXXX
+REM   .session_imported    - flag "xlsx already imported in LS"
+REM   .api_activated       - flag "API port activated in LS"
+REM   .warmup_state        - success counter for first-N push notifications
+REM   session_imports\CL-*.xlsx - clones of template with unique names
+REM   screenshots\         - all screenshots from previous runs
 REM   warmup.log, warmup_api.log
 REM
-REM Что НЕ трогает:
-REM   credentials.ini      — email/password (вписаны юзером)
-REM   templates\           — картинки для template-matching
-REM   session_imports\_template.xlsx — эталон импорта
+REM Does NOT touch:
+REM   credentials.ini      - email/password (filled by user)
+REM   templates\           - template-matching images
+REM   session_imports\_template.xlsx - import template
 REM   config.ini
-REM   urls\                — пул URL'ов
+REM   urls\                - URL pool
 
 echo.
-echo [reset] чищу состояние машины...
+echo [reset] cleaning machine state...
 
 if exist "%~dp0.session_name"     ( del /q "%~dp0.session_name"     && echo  - .session_name )
 if exist "%~dp0.session_imported" ( del /q "%~dp0.session_imported" && echo  - .session_imported )
@@ -39,9 +39,9 @@ if exist "%~dp0warmup.log"     ( del /q "%~dp0warmup.log"     && echo  - warmup.
 if exist "%~dp0warmup_api.log" ( del /q "%~dp0warmup_api.log" && echo  - warmup_api.log )
 
 echo.
-echo [!] Призрак сессии останется внутри Linken Sphere (та, что импортилась).
-echo     Если хочешь с нуля и в LS — открой её, удали правой кнопкой -^> Delete.
-echo     Иначе при следующем run.bat появится новая сессия рядом со старой.
+echo [!] The imported session ghost stays inside Linken Sphere.
+echo     For full LS cleanup - open LS, right-click the session -^> Delete.
+echo     Otherwise next run.bat will create a new session next to the old one.
 echo.
-echo [reset] готово. Теперь .\run.bat — начнётся с чистого листа.
+echo [reset] done. Run .\run.bat - clean slate.
 pause

@@ -1,18 +1,18 @@
-# setup.ps1 — bootstrap для свежей Windows-VPS под Linken Sphere warmup.
+# setup.ps1 - bootstrap for fresh Windows VPS for Linken Sphere warmup.
 #
-# Запуск с любой Windows 10/11/Server 2019+ от АДМИНА:
+# Run from PowerShell as Admin on Windows 10/11/Server 2019+:
 #   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/main/setup.ps1 | iex
 #
-# Что делает:
-#   - проверяет/ставит Git и Python 3.12 (через winget, fallback на прямые
-#     инсталляторы с GitHub/python.org, если winget недоступен на VPS)
-#   - клонирует репозиторий в C:\warmup
-#   - запускает install.bat (Python deps + Linken Sphere + credentials.ini)
-#   - регистрирует задачу в Task Scheduler
+# What it does:
+#   - check/install Git and Python 3.12 (via winget; falls back to direct
+#     installer downloads from github/python.org if winget unavailable on VPS)
+#   - git clone repo to C:\warmup
+#   - run install.bat (Python deps + Linken Sphere + credentials.ini)
+#   - register task in Task Scheduler
 
 $ErrorActionPreference = 'Stop'
 
-# UTF-8 в консоли — чтобы кириллица в логах не превращалась в ????
+# UTF-8 console encoding - keep ASCII strings only just in case
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new() } catch {}
 
 function Write-Step($msg) {
@@ -38,7 +38,7 @@ function Install-Git {
         Write-Step "Installing Git via winget..."
         winget install -e --id Git.Git --silent --accept-source-agreements --accept-package-agreements --scope machine
     } else {
-        Write-Step "winget not available — downloading Git installer directly..."
+        Write-Step "winget not available - downloading Git installer directly..."
         $url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
         $tmp = Join-Path $env:TEMP "git-installer.exe"
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
@@ -63,7 +63,7 @@ function Install-Python {
         Write-Step "Installing Python 3.12 via winget..."
         winget install -e --id Python.Python.3.12 --silent --accept-source-agreements --accept-package-agreements --scope machine
     } else {
-        Write-Step "winget not available — downloading Python 3.12 installer directly..."
+        Write-Step "winget not available - downloading Python 3.12 installer directly..."
         $url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
         $tmp = Join-Path $env:TEMP "python-installer.exe"
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
@@ -79,7 +79,7 @@ function Install-Python {
     }
 }
 
-# 0. Админ-права обязательны
+# 0. Admin rights required
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "[ERROR] Admin rights required." -ForegroundColor Red
@@ -93,7 +93,7 @@ Install-Git
 # 2. Python 3.12
 Install-Python
 
-# 3. Клонировать репозиторий
+# 3. Clone repo
 $repoDir = "C:\warmup"
 if (-not (Test-Path $repoDir)) {
     Write-Step "Cloning https://github.com/r2d23c/mainquns -> $repoDir"
@@ -106,13 +106,13 @@ if (-not (Test-Path $repoDir)) {
 }
 Set-Location $repoDir
 
-# 4. install.bat — поставит python deps + Linken Sphere + откроет credentials.ini
+# 4. install.bat - Python deps + Linken Sphere + opens credentials.ini
 Write-Step "Running install.bat (deps + Linken Sphere + credentials.ini)"
 Write-Host "  -> When Notepad opens, enter your email/password, save (Ctrl+S), close." -ForegroundColor Yellow
 Write-Host "  -> Then press any key in this window to continue." -ForegroundColor Yellow
 cmd /c "install.bat"
 
-# 5. schedule_hourly.bat — зарегистрировать задачу в Task Scheduler
+# 5. schedule_hourly.bat - register the Task Scheduler job
 Write-Step "Registering Task Scheduler job"
 cmd /c "schedule_hourly.bat"
 
