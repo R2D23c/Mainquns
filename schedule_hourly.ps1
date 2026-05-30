@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 $runCmd = Join-Path $ScriptDir 'run_api.bat'
 if (-not (Test-Path $runCmd)) {
-    Write-Host "[ERROR] Не найден $runCmd"
+    Write-Host "[ERROR] not found: $runCmd"
     exit 1
 }
 
@@ -43,16 +43,16 @@ Register-ScheduledTask `
     -Force | Out-Null
 
 Write-Host ""
-Write-Host "[OK] Задача '$TaskName' создана."
-Write-Host " - Первый запуск через 15 секунд, далее каждые 52 минуты."
-Write-Host " - Зовётся run_api.bat. Логика внутри:"
-Write-Host "     первый раз (флагов нет) → warmup.py — UI install"
-Write-Host "                                 (login, API port, импорт сессии)"
-Write-Host "     дальше                 → warmup_api.py — чанковый API-флоу"
-Write-Host "                                 (4-6 × ~100 URL из 40k_all_urls.txt)"
-Write-Host " - Работает только когда ты залогинен в Windows."
+Write-Host "[OK] Task '$TaskName' registered."
+Write-Host " - First trigger in 15 seconds, then every 52 minutes."
+Write-Host " - Calls run_api.bat. Internal logic:"
+Write-Host "     first run (no flags) -> warmup.py (UI install:"
+Write-Host "                              login, API port, session import)"
+Write-Host "     subsequent           -> warmup_api.py (chunked API flow:"
+Write-Host "                              ~100 random URLs from 40k_all_urls.txt)"
+Write-Host " - Only runs while you are logged into Windows."
 Write-Host ""
-Write-Host "Можешь уходить от компа — install и прогрев пойдут сами."
+Write-Host "You can close all windows and walk away."
 Write-Host ""
-Write-Host "Проверить сейчас: Win+R -> taskschd.msc -> Task Scheduler Library"
-Write-Host "                  -> $TaskName -> правой кнопкой -> Run."
+Write-Host "Check now: Win+R -> taskschd.msc -> Task Scheduler Library"
+Write-Host "           -> $TaskName -> right click -> Run."
