@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import configparser
 import ctypes
-import glob
 import logging
 import os
 import random
-import shutil
 import subprocess
 import sys
 import time
@@ -1141,86 +1139,37 @@ def _files_dir(cfg: configparser.ConfigParser) -> str:
     return p
 
 
-def _done_dir(cfg: configparser.ConfigParser) -> str:
-    return os.path.join(_files_dir(cfg), "done")
-
-
-def archive_used_file(src_path: str, cfg: configparser.ConfigParser) -> None:
-    """Переносит отработанный файл в done/<timestamp>_<имя>."""
-    done_dir = _done_dir(cfg)
-    os.makedirs(done_dir, exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    dst = os.path.join(done_dir, f"{ts}_{os.path.basename(src_path)}")
-    try:
-        shutil.move(src_path, dst)
-        log.info("файл перенесён в done: %s", dst)
-    except OSError as e:
-        log.warning("не удалось перенести %s в done: %s", src_path, e)
-
-
-def regenerate_files_from_done(cfg: configparser.ConfigParser) -> int:
-    """
-    Если files_dir пуст — берёт все URL'ы из done/, перемешивает,
-    режет на куски по lines_per_file и кладёт обратно как новые файлы.
-    Возвращает число созданных файлов.
-    """
-    files_dir = _files_dir(cfg)
-    done_dir = _done_dir(cfg)
-    pattern = cfg.get("paths", "file_glob")
-    lines_per_file = cfg.getint("paths", "regenerate_lines_per_file", fallback=100)
-
-    if not os.path.isdir(done_dir):
-        return 0
-
-    done_files = glob.glob(os.path.join(done_dir, pattern))
-    all_urls: list[str] = []
-    for src in done_files:
-        try:
-            with open(src, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        all_urls.append(line)
-        except OSError as e:
-            log.warning("не удалось прочитать %s: %s", src, e)
-
-    if not all_urls:
-        return 0
-
-    random.shuffle(all_urls)
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    created = 0
-    for i in range(0, len(all_urls), lines_per_file):
-        chunk = all_urls[i:i + lines_per_file]
-        out_path = os.path.join(files_dir, f"regen_{ts}_{created:04d}.txt")
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(chunk) + "\n")
-        created += 1
-
-    log.info(
-        "regenerate: %d URL'ов из %d файлов done/ → %d новых файлов по ~%d строк",
-        len(all_urls), len(done_files), created, lines_per_file,
-    )
-    return created
-
-
 def pick_random_file(cfg: configparser.ConfigParser) -> str:
-    files_dir = _files_dir(cfg)
-    pattern = cfg.get("paths", "file_glob")
-    candidates = glob.glob(os.path.join(files_dir, pattern))
+    """Сэмплит ~100 случайных URL из [api] url_pool_file (40k_all_urls.txt)
+    и материализует временный файл urls_generated/manual_<ts>.txt — он
+    привязывается к UI warmup через Browse File. Тот же источник, что
+    использует warmup_api.py, симметрия между ручным и автоматическим
+    флоу."""
+    pool_rel = cfg.get("api", "url_pool_file", fallback="urls/40k_all_urls.txt")
+    pool_path = ROOT / pool_rel
+    if not pool_path.exists():
+        raise FileNotFoundError(f"URL-пул не найден: {pool_path}")
+    pool: list[str] = []
+    seen: set[str] = set()
+    for line in pool_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        u = line.strip()
+        if u and u not in seen:
+            seen.add(u)
+            pool.append(u)
+    if not pool:
+        raise RuntimeError(f"в {pool_path} нет ни одного URL")
+    n_min = cfg.getint("api", "urls_per_run_min", fallback=95)
+    n_max = cfg.getint("api", "urls_per_run_max", fallback=105)
+    n = min(random.randint(n_min, n_max), len(pool))
+    urls = random.sample(pool, n)
 
-    if not candidates:
-        log.info("files_dir пуст — пробую регенерировать из done/")
-        if regenerate_files_from_done(cfg) > 0:
-            candidates = glob.glob(os.path.join(files_dir, pattern))
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"в {files_dir} нет файлов по маске {pattern} (done/ тоже пуст)"
-        )
-    chosen = random.choice(candidates)
-    log.info("случайный файл (%d кандидатов): %s", len(candidates), chosen)
-    return chosen
+    out_dir = ROOT / "urls_generated"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    out_file = out_dir / f"manual_{ts}.txt"
+    out_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
+    log.info("выбрано %d URL из пула %d → %s", n, len(pool), out_file)
+    return str(out_file)
 
 
 def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> None:
@@ -1625,8 +1574,11 @@ def run() -> int:
         # Если alert появился и был закрыт — выходим раньше (без полного ожидания).
         _wait_for_firewall_alert(90.0, exit_after_close=True)
 
-        # 8. отработанный файл — в done/
-        archive_used_file(file_to_attach, cfg)
+        # 8. temp-файл с URL'ами больше не нужен — удаляем
+        try:
+            os.remove(file_to_attach)
+        except OSError as e:
+            log.warning("не получилось удалить %s: %s", file_to_attach, e)
 
         log.info("сценарий завершён успешно")
         # Первые N успешных запусков подтверждаем push'ем — чтобы убедиться,

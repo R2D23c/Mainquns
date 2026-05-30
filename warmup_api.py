@@ -146,38 +146,23 @@ def load_url_pool(cfg: configparser.ConfigParser) -> list[str]:
     return pool
 
 
-def materialize_chunks(
+def materialize_run_urls(
     pool: list[str], cfg: configparser.ConfigParser
-) -> tuple[Path, list[list[str]]]:
-    """Выбирает random N URL из пула (urls_per_run_min..max), режет на M
-    чанков (chunks_min..max) ~равной длины. Каждый чанк пишет файлом в
-    urls_generated/run_<ts>/file_<i>.txt для audit. Возвращает (папка_прогона,
-    list_of_chunks)."""
-    n_min = cfg.getint("api", "urls_per_run_min", fallback=400)
-    n_max = cfg.getint("api", "urls_per_run_max", fallback=600)
-    c_min = cfg.getint("api", "chunks_min", fallback=4)
-    c_max = cfg.getint("api", "chunks_max", fallback=6)
-
-    n_total = min(random.randint(n_min, n_max), len(pool))
-    n_chunks = random.randint(c_min, c_max)
-    n_chunks = max(1, min(n_chunks, n_total))
-
-    selected = random.sample(pool, n_total)
-    # Режем как можно ровнее — длина last chunk может отличаться на ±1.
-    chunk_size = n_total // n_chunks
-    chunks: list[list[str]] = []
-    for i in range(n_chunks):
-        start = i * chunk_size
-        end = n_total if i == n_chunks - 1 else start + chunk_size
-        chunks.append(selected[start:end])
+) -> tuple[Path, list[str]]:
+    """Сэмплит ~100 случайных URL из пула (urls_per_run_min..max), пишет
+    файлом в urls_generated/run_<ts>.txt для audit. Возвращает (файл, urls)."""
+    n_min = cfg.getint("api", "urls_per_run_min", fallback=95)
+    n_max = cfg.getint("api", "urls_per_run_max", fallback=105)
+    n = min(random.randint(n_min, n_max), len(pool))
+    urls = random.sample(pool, n)
 
     ts = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = ROOT / "urls_generated" / f"run_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    for i, chunk in enumerate(chunks, start=1):
-        (run_dir / f"file_{i}.txt").write_text("\n".join(chunk) + "\n", encoding="utf-8")
-    log.info("чанков подготовлено: %d (всего URL: %d) → %s", len(chunks), n_total, run_dir)
-    return run_dir, chunks
+    out_dir = ROOT / "urls_generated"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"run_{ts}.txt"
+    out_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
+    log.info("выбрано %d URL → %s", n, out_file)
+    return out_file, urls
 
 
 def load_session_imported_flag() -> tuple[str | None, str | None]:
@@ -392,45 +377,28 @@ def run() -> int:
         log.info("используем uuid=%s (name=%r)", uuid, sess.get("name"))
 
         pool = load_url_pool(cfg)
-        run_dir, chunks = materialize_chunks(pool, cfg)
-        total_urls = sum(len(c) for c in chunks)
-        log.info("план: %d чанков × ~%d URL (всего %d) из пула %d",
-                 len(chunks), total_urls // len(chunks), total_urls, len(pool))
+        run_file, urls = materialize_run_urls(pool, cfg)
+        log.info("план: %d URL (пул %d) view_depth=%d time_per_url=%d",
+                 len(urls), len(pool), view_depth, time_per_url)
 
-        pause = cfg.getfloat("api", "pause_between_chunks_seconds", fallback=3.0)
         t_start = time.time()
-        for i, chunk in enumerate(chunks, start=1):
-            log.info("=" * 50)
-            log.info("чанк %d/%d (%d URL) — start_warmup view_depth=%d time_per_url=%d",
-                     i, len(chunks), len(chunk), view_depth, time_per_url)
-            try:
-                client.start_warmup(uuid, chunk, view_depth, time_per_url)
-            except ApiError as e:
-                # Падение на конкретном чанке — выходим из цикла, шлём
-                # high-priority ntfy с указанием на какой именно сорвалось.
-                raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {e}") from e
-            ok = wait_for_warmup_done(client, uuid, cfg)
-            if not ok:
-                log.warning("чанк %d не подтвердился поллингом (status неясен)", i)
-            if i < len(chunks):
-                time.sleep(pause)
-
+        client.start_warmup(uuid, urls, view_depth, time_per_url)
+        ok = wait_for_warmup_done(client, uuid, cfg)
+        if not ok:
+            log.warning("прогрев не подтверждён поллингом (status неясен)")
         elapsed = time.time() - t_start
-        # Чанки отработаны — папка run_dir больше не нужна (флаги
-        # .session_imported и логи уже фиксируют что когда было).
+
+        # Файл прогона больше не нужен (логи фиксируют что когда было).
         try:
-            for f in run_dir.glob("*"):
-                f.unlink()
-            run_dir.rmdir()
+            run_file.unlink()
         except OSError as e:
-            log.warning("не получилось убрать %s: %s", run_dir, e)
+            log.warning("не получилось убрать %s: %s", run_file, e)
 
         log.info("сценарий завершён успешно за %.0fм", elapsed / 60)
         notify_ntfy(
             f"machine: {host}\n"
             f"session: {session_name}\n"
-            f"chunks: {len(chunks)} × ~{total_urls // len(chunks)} = {total_urls} URL\n"
-            f"settings: view_depth={view_depth} time_per_url={time_per_url}\n"
+            f"urls: {len(urls)} (view_depth={view_depth} time_per_url={time_per_url})\n"
             f"elapsed: {elapsed/60:.0f} мин",
             title="warmup OK",
             priority="low",
