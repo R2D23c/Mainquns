@@ -398,28 +398,43 @@ def run() -> int:
         log.info("план: %d URL (пул %d) view_depth=%d time_per_url=%d",
                  len(urls), len(pool), view_depth, time_per_url)
 
-        t_start = time.time()
-        client.start_warmup(uuid, urls, view_depth, time_per_url)
+        # LS API не принимает большие массивы URL в одном /start_warmup
+        # (валидатор отвечает 'array has too many items' уже на ~99). Так что
+        # режем выбранные URL на чанки по urls_per_chunk_max и гоняем их
+        # ПОСЛЕДОВАТЕЛЬНО, дожидаясь окончания каждого перед следующим.
+        chunk_size = cfg.getint("api", "urls_per_chunk_max", fallback=7)
+        chunks: list[list[str]] = [urls[i:i + chunk_size] for i in range(0, len(urls), chunk_size)]
+        pause = cfg.getfloat("api", "pause_between_chunks_seconds", fallback=3.0)
+        log.info("чанков: %d × до %d URL (всего %d)", len(chunks), chunk_size, len(urls))
 
-        # Во время прогрева (~40 мин) Windows может в любой момент показать
-        # firewall alert. Спавним фоновый watcher, который дисмиссит его
-        # каждые 15 секунд, пока идёт wait_for_warmup_done. Он не зависит
-        # от нашего поллинга API и работает параллельно.
+        # Firewall watcher на ВСЁ время прогрева (все чанки + паузы).
         import subprocess
         fw_proc = subprocess.Popen(
             [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        t_start = time.time()
+        chunks_done = 0
         try:
-            ok = wait_for_warmup_done(client, uuid, cfg)
+            for i, chunk in enumerate(chunks, start=1):
+                log.info("=" * 50)
+                log.info("чанк %d/%d (%d URL) — start_warmup", i, len(chunks), len(chunk))
+                try:
+                    client.start_warmup(uuid, chunk, view_depth, time_per_url)
+                except ApiError as e:
+                    raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {e}") from e
+                ok = wait_for_warmup_done(client, uuid, cfg)
+                if not ok:
+                    log.warning("чанк %d не подтвердился поллингом", i)
+                chunks_done += 1
+                if i < len(chunks):
+                    time.sleep(pause)
         finally:
             fw_proc.terminate()
             try:
                 fw_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 fw_proc.kill()
-        if not ok:
-            log.warning("прогрев не подтверждён поллингом (status неясен)")
         elapsed = time.time() - t_start
 
         # Файл прогона больше не нужен (логи фиксируют что когда было).
@@ -428,11 +443,13 @@ def run() -> int:
         except OSError as e:
             log.warning("не получилось убрать %s: %s", run_file, e)
 
-        log.info("сценарий завершён успешно за %.0fм", elapsed / 60)
+        log.info("сценарий завершён успешно за %.0fм (%d/%d чанков)",
+                 elapsed / 60, chunks_done, len(chunks))
         notify_ntfy(
             f"machine: {host}\n"
             f"session: {session_name}\n"
-            f"urls: {len(urls)} (view_depth={view_depth} time_per_url={time_per_url})\n"
+            f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {len(urls)} URL\n"
+            f"settings: view_depth={view_depth} time_per_url={time_per_url}\n"
             f"elapsed: {elapsed/60:.0f} мин",
             title="warmup OK",
             priority="low",
