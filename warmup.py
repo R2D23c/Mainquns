@@ -636,11 +636,21 @@ def _dismiss_firewall_alert() -> bool:
         return False
 
     log.info("Firewall Alert hwnd=%d title=%r", hwnd, matched)
-    # Полная процедура форсинга foreground для Win10 (одного SetForegroundWindow
-    # часто мало — Windows игнорирует если вызывающий не foreground app).
-    ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
-    ctypes.windll.user32.BringWindowToTop(hwnd)
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    user32 = ctypes.windll.user32
+
+    def _force_foreground(target_hwnd: int) -> bool:
+        """Возвращает True если окно ещё живо и попытка поднять отработала.
+        Если окно закрылось (например, мы успешно его дисмиссили) — False,
+        и дальше отправлять keystroke смысла нет."""
+        if not user32.IsWindow(target_hwnd):
+            return False
+        user32.ShowWindow(target_hwnd, 9)   # SW_RESTORE
+        user32.BringWindowToTop(target_hwnd)
+        user32.SetForegroundWindow(target_hwnd)
+        return True
+
+    if not _force_foreground(hwnd):
+        return False
     time.sleep(0.5)
 
     rect = _RECT()
@@ -657,12 +667,22 @@ def _dismiss_firewall_alert() -> bool:
     pyautogui.click(bx, by)
     time.sleep(0.5)
 
-    # Подстраховка #1: Alt+A — горячая клавиша 'Allow access' (Win-конвенция).
-    pyautogui.hotkey("alt", "a")
-    time.sleep(0.5)
-    # Подстраховка #2: Enter — 'Allow access' часто default-кнопка с shield.
-    pyautogui.press("enter")
-    time.sleep(1.0)
+    # Если клик ПРОМАХНУЛСЯ — активным стало окно под промахом (LS wizard или
+    # что-то ещё), и наши Alt+A/Enter улетят туда. ПЕРЕД каждой комбинацией
+    # форсим firewall обратно в foreground. Если окно уже закрылось (значит
+    # клик попал ИЛИ один из предыдущих keystroke сработал) — выходим.
+    if _force_foreground(hwnd):
+        time.sleep(0.2)
+        # Подстраховка #1: Alt+A — горячая клавиша 'Allow access' (Win-конвенция).
+        pyautogui.hotkey("alt", "a")
+        time.sleep(0.5)
+
+    if _force_foreground(hwnd):
+        time.sleep(0.2)
+        # Подстраховка #2: Enter — 'Allow access' часто default-кнопка с shield.
+        pyautogui.press("enter")
+        time.sleep(1.0)
+
     return True
 
 
