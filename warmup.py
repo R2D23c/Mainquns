@@ -636,6 +636,10 @@ def _dismiss_firewall_alert() -> bool:
         return False
 
     log.info("Firewall Alert hwnd=%d title=%r", hwnd, matched)
+    # Полная процедура форсинга foreground для Win10 (одного SetForegroundWindow
+    # часто мало — Windows игнорирует если вызывающий не foreground app).
+    ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+    ctypes.windll.user32.BringWindowToTop(hwnd)
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.5)
 
@@ -643,17 +647,21 @@ def _dismiss_firewall_alert() -> bool:
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
-    # 'Allow access' — справа внизу. Координаты замерены на стандартном виде
-    # диалога: x ~ 65% ширины, y ~ 87% высоты.
-    bx = rect.left + int(w * 0.65)
-    by = rect.top + int(h * 0.87)
+    # 'Allow access' — кнопка с UAC-shield, чуть левее центра, низ окна.
+    # Перекалибровано по реальному скриншоту LS firewall popup'а на Win10:
+    # ~43% ширины, ~70% высоты. Старые 65%/87% улетали правее и ниже кнопки.
+    bx = rect.left + int(w * 0.43)
+    by = rect.top + int(h * 0.70)
     log.info("клик 'Allow access' @(%d,%d) (окно %dx%d)", bx, by, w, h)
     _record_click(bx, by, "fw_allow")
     pyautogui.click(bx, by)
     time.sleep(0.5)
 
-    # Подстраховка: на некоторых системах кнопка отзывается на Alt+A
+    # Подстраховка #1: Alt+A — горячая клавиша 'Allow access' (Win-конвенция).
     pyautogui.hotkey("alt", "a")
+    time.sleep(0.5)
+    # Подстраховка #2: Enter — 'Allow access' часто default-кнопка с shield.
+    pyautogui.press("enter")
     time.sleep(1.0)
     return True
 
@@ -723,8 +731,11 @@ def _click_allow_access_template() -> bool:
     for tpl_name in ("allow_access", "allow_access2"):
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
             continue
+        # Понижаем порог до 0.70 СПЕЦИАЛЬНО для allow-кнопок: шаблоны 180×53
+        # и 249×60 в multi-scale матчинге часто дают best ~0.65-0.72 из-за
+        # DPI/UAC-shield render. 0.80 был слишком строгий, ловили миссы.
         pt = _match_template_in_region(
-            tpl_name, 0.80,
+            tpl_name, 0.70,
             0, 0, screen_w, screen_h,
         )
         if pt is None:
