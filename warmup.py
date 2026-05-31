@@ -657,32 +657,34 @@ def _dismiss_firewall_alert() -> bool:
     ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
-    # 'Allow access' — кнопка с UAC-shield, чуть левее центра, низ окна.
-    # Перекалибровано по реальному скриншоту LS firewall popup'а на Win10:
-    # ~43% ширины, ~70% высоты. Старые 65%/87% улетали правее и ниже кнопки.
-    bx = rect.left + int(w * 0.43)
-    by = rect.top + int(h * 0.70)
-    log.info("клик 'Allow access' @(%d,%d) (окно %dx%d)", bx, by, w, h)
-    _record_click(bx, by, "fw_allow")
-    pyautogui.click(bx, by)
-    time.sleep(0.5)
 
-    # Если клик ПРОМАХНУЛСЯ — активным стало окно под промахом (LS wizard или
-    # что-то ещё), и наши Alt+A/Enter улетят туда. ПЕРЕД каждой комбинацией
-    # форсим firewall обратно в foreground. Если окно уже закрылось (значит
-    # клик попал ИЛИ один из предыдущих keystroke сработал) — выходим.
+    # Попытка #1 — Alt+A (Windows-конвенция, 'A' подчёркнуто в 'Allow access').
+    # БЕЗОПАСНО: даже если попап изменился и Alt+A что-то другое выберет,
+    # это не сломает другие окна — keystroke перехватит focused dialog.
+    # Делаем ПЕРВЫМ, потому что coord-клик может промахнуться на чекбокс
+    # 'Public/Private networks' (что и случилось в прошлый раз).
+    log.info("Firewall dismiss: Alt+A (окно %dx%d)", w, h)
+    pyautogui.hotkey("alt", "a")
+    time.sleep(0.8)
+
+    # Попытка #2 — клик в координаты, если Alt+A не сработал.
+    # ~72% ширины, ~91% высоты — реальное место кнопки 'Allow access' в
+    # стандартном WinDefender popup'е (нижний кластер, левая из двух).
     if _force_foreground(hwnd):
         time.sleep(0.2)
-        # Подстраховка #1: Alt+A — горячая клавиша 'Allow access' (Win-конвенция).
-        pyautogui.hotkey("alt", "a")
-        time.sleep(0.5)
-
-    if _force_foreground(hwnd):
-        time.sleep(0.2)
-        # Подстраховка #2: Enter — 'Allow access' часто default-кнопка с shield.
-        pyautogui.press("enter")
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        bx = rect.left + int(w * 0.72)
+        by = rect.top + int(h * 0.91)
+        log.info("клик 'Allow access' @(%d,%d) (окно %dx%d)", bx, by, w, h)
+        _record_click(bx, by, "fw_allow")
+        pyautogui.click(bx, by)
         time.sleep(1.0)
 
+    # Enter НЕ шлём: на некоторых вариантах popup'а default-кнопкой может
+    # стать Cancel (например если оба чекбокса networks сняты) — Enter
+    # закроет popup, но навсегда заблокирует приложение в firewall.
     return True
 
 
