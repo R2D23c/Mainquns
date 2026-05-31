@@ -10,6 +10,8 @@ credentials.ini
 .session_imported
 .session_name
 .api_activated
+.warmup_target
+.warmup_count
 warmup_api.log
 session_imports/CL-*.xlsx
 urls_generated/

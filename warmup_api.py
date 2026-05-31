@@ -40,6 +40,14 @@ SESSION_NAME_FILE = ROOT / ".session_name"
 # Флаг «сессия импортирована», пишется warmup.py после UI-импорта.
 # Формат: «<uuid>\t<name>» (новый) либо просто «<name>» (старый — fallback).
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
+# One-shot режим: целевой объём прогрева и текущий счётчик.
+# .warmup_target — random.randint(min, max), фиксируется один раз.
+# .warmup_count — суммарно прогрето URL с момента инсталляции.
+WARMUP_TARGET_FILE = ROOT / ".warmup_target"
+WARMUP_COUNT_FILE = ROOT / ".warmup_count"
+# Имя задачи в Task Scheduler — должно совпадать с тем, что регистрирует
+# schedule_hourly.ps1. После достижения target скрипт сам её disable'нёт.
+TASK_NAME = "LinkenSphereWarmup"
 
 # Тот же топик, что и UI-флоу, — чтобы все push'ы шли в один канал.
 NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
@@ -163,6 +171,60 @@ def materialize_run_urls(
     out_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
     log.info("выбрано %d URL → %s", n, out_file)
     return out_file, urls
+
+
+def load_or_create_target(cfg: configparser.ConfigParser) -> int:
+    """Целевой суммарный объём прогрева. На первом запуске генерится
+    random.randint(min, max) и пишется в .warmup_target. Дальше всегда
+    читается оттуда — менять задним числом нельзя, иначе counter
+    становится неконсистентен."""
+    if WARMUP_TARGET_FILE.exists():
+        try:
+            return int(WARMUP_TARGET_FILE.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pass
+    lo = cfg.getint("api", "urls_total_target_min", fallback=400)
+    hi = cfg.getint("api", "urls_total_target_max", fallback=600)
+    target = random.randint(lo, hi)
+    WARMUP_TARGET_FILE.write_text(str(target), encoding="utf-8")
+    log.info("целевой объём прогрева: %d URL (зафиксирован в .warmup_target)", target)
+    return target
+
+
+def load_warmed_count() -> int:
+    if not WARMUP_COUNT_FILE.exists():
+        return 0
+    try:
+        return int(WARMUP_COUNT_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def add_warmed_count(n: int) -> int:
+    new_total = load_warmed_count() + n
+    WARMUP_COUNT_FILE.write_text(str(new_total), encoding="utf-8")
+    return new_total
+
+
+def disable_scheduled_task() -> bool:
+    """schtasks /change /tn LinkenSphereWarmup /disable — задача остаётся
+    зарегистрированной, но больше не стреляет. Юзер может включить обратно
+    через /enable или удалить через /delete /f. Возвращает True если ок."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["schtasks", "/change", "/tn", TASK_NAME, "/disable"],
+            capture_output=True, timeout=15, text=True,
+        )
+        if result.returncode == 0:
+            log.info("scheduled task %r disabled (returncode=0)", TASK_NAME)
+            return True
+        log.warning("schtasks /disable returncode=%d stderr=%r",
+                    result.returncode, result.stderr.strip())
+        return False
+    except Exception as e:
+        log.warning("не получилось disable scheduled task: %s", e)
+        return False
 
 
 def load_session_imported_flag() -> tuple[str | None, str | None]:
@@ -364,6 +426,24 @@ def run() -> int:
         email = creds.get("account", "email").strip()
         password = creds.get("account", "password")
 
+        # One-shot гейт: уже прогрели целевой объём? — JOB DONE, на выход.
+        target = load_or_create_target(cfg)
+        current = load_warmed_count()
+        if current >= target:
+            log.info("ALL JOBS DONE: %d/%d URL прогрето, scheduled task disabled", current, target)
+            disable_scheduled_task()
+            notify_ntfy(
+                f"machine: {host}\n"
+                f"session: {session_name}\n"
+                f"total: {current}/{target} URL warmed\n"
+                f"scheduled task disabled. All jobs done 🎉",
+                title="warmup all done",
+                priority="low",
+                tags="tada",
+            )
+            return 0
+        log.info("прогресс: %d/%d URL (осталось ~%d)", current, target, max(0, target - current))
+
         base_url = cfg.get("api", "base_url", fallback="http://127.0.0.1:36555")
         http_timeout = cfg.getfloat("api", "http_timeout_seconds", fallback=15.0)
         view_depth = cfg.getint("warmup", "viewing_depth", fallback=3)
@@ -443,18 +523,37 @@ def run() -> int:
         except OSError as e:
             log.warning("не получилось убрать %s: %s", run_file, e)
 
-        log.info("сценарий завершён успешно за %.0fм (%d/%d чанков)",
-                 elapsed / 60, chunks_done, len(chunks))
-        notify_ntfy(
-            f"machine: {host}\n"
-            f"session: {session_name}\n"
-            f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {len(urls)} URL\n"
-            f"settings: view_depth={view_depth} time_per_url={time_per_url}\n"
-            f"elapsed: {elapsed/60:.0f} мин",
-            title="warmup OK",
-            priority="low",
-            tags="white_check_mark",
-        )
+        # Считаем сколько URL реально прогрели в этом запуске (только успешные чанки).
+        urls_warmed_now = sum(len(c) for c in chunks[:chunks_done])
+        new_total = add_warmed_count(urls_warmed_now)
+        target_reached = new_total >= target
+
+        log.info("сценарий завершён успешно за %.0fм (%d/%d чанков, +%d URL → %d/%d)",
+                 elapsed / 60, chunks_done, len(chunks), urls_warmed_now, new_total, target)
+
+        if target_reached:
+            disable_scheduled_task()
+            notify_ntfy(
+                f"machine: {host}\n"
+                f"session: {session_name}\n"
+                f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
+                f"total: {new_total}/{target} URL — target reached 🎉\n"
+                f"scheduled task disabled. All jobs done.",
+                title="warmup all done",
+                priority="low",
+                tags="tada",
+            )
+        else:
+            notify_ntfy(
+                f"machine: {host}\n"
+                f"session: {session_name}\n"
+                f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {urls_warmed_now} URL\n"
+                f"progress: {new_total}/{target} URL ({100*new_total//target}%)\n"
+                f"elapsed: {elapsed/60:.0f} мин",
+                title="warmup OK",
+                priority="low",
+                tags="white_check_mark",
+            )
         return 0
 
     except Exception as exc:
