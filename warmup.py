@@ -296,6 +296,18 @@ def _write_success_count(n: int) -> None:
         log.warning("не удалось записать %s: %s", SUCCESS_STATE_FILE, e)
 
 
+def _ntfy_header() -> str:
+    """Единый префикс для всех ntfy-сообщений: session + machine.
+    session ВСЕГДА первым — на телефоне его удобно ловить глазом,
+    т.к. имена машин (hostname) могут совпадать между VPS."""
+    import socket
+    try:
+        sess = load_session_name()
+    except Exception:
+        sess = "<unknown>"
+    return f"session: {sess}\nmachine: {socket.gethostname()}\n"
+
+
 def notify_ntfy(message: str, title: str = "warmup failed") -> None:
     """Шлёт push через ntfy.sh без какой-либо настройки на машине.
     Все ошибки (сети нет, сервис лежит, и т.д.) глотаются — нотификация
@@ -1621,10 +1633,9 @@ def run() -> int:
             count += 1
             _write_success_count(count)
             try:
-                import socket
                 notify_ntfy(
-                    f"machine: {socket.gethostname()}\n"
-                    f"успешный запуск {count}/{SUCCESS_NOTIFY_COUNT}",
+                    _ntfy_header() +
+                    f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}",
                     title="warmup OK",
                 )
             except Exception:
@@ -1635,13 +1646,12 @@ def run() -> int:
         log.exception("сценарий упал: %s", exc)
         screenshot("ERROR", True)
         try:
-            import socket
             tail_lines: list[str] = []
             if LOG_FILE.exists():
                 with LOG_FILE.open(encoding="utf-8", errors="ignore") as f:
                     tail_lines = f.readlines()[-15:]
             notify_ntfy(
-                f"machine: {socket.gethostname()}\n"
+                _ntfy_header() +
                 f"error: {exc}\n\n"
                 f"tail:\n" + "".join(tail_lines)
             )

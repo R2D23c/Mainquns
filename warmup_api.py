@@ -136,6 +136,17 @@ def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
+def _ntfy_header() -> str:
+    """Единый префикс для всех ntfy-сообщений: session + machine.
+    session ВСЕГДА первым — на телефоне его удобно ловить глазом,
+    т.к. имена машин (hostname) могут совпадать между VPS."""
+    try:
+        sess = load_session_name()
+    except Exception:
+        sess = "<unknown>"
+    return f"session: {sess}\nmachine: {socket.gethostname()}\n"
+
+
 def load_url_pool(cfg: configparser.ConfigParser) -> list[str]:
     """Читает большой файл-пул из [api] url_pool_file, дедуплицирует."""
     rel = cfg.get("api", "url_pool_file", fallback="urls/40k_all_urls.txt")
@@ -433,8 +444,7 @@ def run() -> int:
             log.info("ALL JOBS DONE: %d/%d URL прогрето, scheduled task disabled", current, target)
             disable_scheduled_task()
             notify_ntfy(
-                f"machine: {host}\n"
-                f"session: {session_name}\n"
+                _ntfy_header() +
                 f"total: {current}/{target} URL warmed\n"
                 f"scheduled task disabled. All jobs done 🎉",
                 title="warmup all done",
@@ -534,8 +544,7 @@ def run() -> int:
         if target_reached:
             disable_scheduled_task()
             notify_ntfy(
-                f"machine: {host}\n"
-                f"session: {session_name}\n"
+                _ntfy_header() +
                 f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
                 f"total: {new_total}/{target} URL — target reached 🎉\n"
                 f"scheduled task disabled. All jobs done.",
@@ -545,8 +554,7 @@ def run() -> int:
             )
         else:
             notify_ntfy(
-                f"machine: {host}\n"
-                f"session: {session_name}\n"
+                _ntfy_header() +
                 f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {urls_warmed_now} URL\n"
                 f"progress: {new_total}/{target} URL ({100*new_total//target}%)\n"
                 f"elapsed: {elapsed/60:.0f} мин",
@@ -566,7 +574,7 @@ def run() -> int:
             except Exception:
                 pass
         notify_ntfy(
-            f"machine: {host}\n"
+            _ntfy_header() +
             f"error: {exc}\n\n"
             f"tail:\n{tail}",
             title="warmup failed (api)",
