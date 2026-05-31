@@ -509,10 +509,29 @@ def run() -> int:
             for i, chunk in enumerate(chunks, start=1):
                 log.info("=" * 50)
                 log.info("чанк %d/%d (%d URL) — start_warmup", i, len(chunks), len(chunk))
-                try:
-                    client.start_warmup(uuid, chunk, view_depth, time_per_url)
-                except ApiError as e:
-                    raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {e}") from e
+                # Retry на HTTP 409 «Session is used by another client or
+                # operation». Эта ошибка ловится между чанками: предыдущий
+                # warmup уже отдал status != "warmup", но LS внутри ещё
+                # закрывает браузерные процессы и держит сессию занятой.
+                # 3 попытки: первая сразу, потом ждём 15с / 30с.
+                _last_err: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        client.start_warmup(uuid, chunk, view_depth, time_per_url)
+                        _last_err = None
+                        break
+                    except ApiError as e:
+                        msg = str(e)
+                        retriable = "HTTP 409" in msg and "Session is used" in msg
+                        _last_err = e
+                        if not retriable or attempt == 2:
+                            break
+                        wait = 15 * (attempt + 1)  # 15, 30
+                        log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/3",
+                                    i, wait, attempt + 2)
+                        time.sleep(wait)
+                if _last_err is not None:
+                    raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {_last_err}") from _last_err
                 ok = wait_for_warmup_done(client, uuid, cfg)
                 if not ok:
                     log.warning("чанк %d не подтвердился поллингом", i)
