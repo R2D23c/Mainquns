@@ -45,6 +45,11 @@ SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 # .warmup_count — суммарно прогрето URL с момента инсталляции.
 WARMUP_TARGET_FILE = ROOT / ".warmup_target"
 WARMUP_COUNT_FILE = ROOT / ".warmup_count"
+# Флаг «done-уведомление уже отправлено». Если scheduler по какой-то
+# причине ещё стреляет (schtasks /disable не сработал), мы НЕ шлём
+# повторные «all jobs done» — просто тихо пытаемся ещё раз отключить
+# задачу и выходим. Юзер получает уведомление РОВНО один раз.
+NOTIFIED_DONE_FLAG = ROOT / ".notified_done"
 # Имя задачи в Task Scheduler — должно совпадать с тем, что регистрирует
 # schedule_hourly.ps1. После достижения target скрипт сам её disable'нёт.
 TASK_NAME = "LinkenSphereWarmup"
@@ -217,25 +222,53 @@ def add_warmed_count(n: int) -> int:
     return new_total
 
 
-def disable_scheduled_task() -> bool:
-    """schtasks /change /tn LinkenSphereWarmup /disable — задача остаётся
-    зарегистрированной, но больше не стреляет. Юзер может включить обратно
-    через /enable или удалить через /delete /f. Возвращает True если ок."""
-    import subprocess
+def already_notified_done() -> bool:
+    return NOTIFIED_DONE_FLAG.exists()
+
+
+def mark_notified_done() -> None:
     try:
-        result = subprocess.run(
-            ["schtasks", "/change", "/tn", TASK_NAME, "/disable"],
-            capture_output=True, timeout=15, text=True,
-        )
-        if result.returncode == 0:
-            log.info("scheduled task %r disabled (returncode=0)", TASK_NAME)
-            return True
-        log.warning("schtasks /disable returncode=%d stderr=%r",
-                    result.returncode, result.stderr.strip())
-        return False
-    except Exception as e:
-        log.warning("не получилось disable scheduled task: %s", e)
-        return False
+        NOTIFIED_DONE_FLAG.write_text("1", encoding="utf-8")
+    except OSError as e:
+        log.warning("не получилось записать %s: %s", NOTIFIED_DONE_FLAG, e)
+
+
+def disable_scheduled_task() -> bool:
+    """Гарантированно гасит scheduled-задачу. Три уровня fallback'а, потому
+    что schtasks бывает фейлится тихо (cp1251 окружение, нет прав на
+    /change, путь к задаче в подпапке и т.п.) — а если задача продолжает
+    стрелять, юзер получает спам «all jobs done» каждые 52 минуты.
+      1) schtasks /change /tn <name> /disable
+      2) powershell Disable-ScheduledTask -TaskName <name>
+      3) schtasks /delete /tn <name> /f   (последний рубеж)
+    Возвращает True если хоть один шаг отработал returncode=0."""
+    import subprocess
+
+    def _run(cmd: list[str], label: str) -> bool:
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=20, text=True)
+            if r.returncode == 0:
+                log.info("disable scheduled task: %s — OK", label)
+                return True
+            log.warning("disable scheduled task: %s — rc=%d stderr=%r stdout=%r",
+                        label, r.returncode, (r.stderr or "").strip(), (r.stdout or "").strip())
+            return False
+        except Exception as e:
+            log.warning("disable scheduled task: %s — exception: %s", label, e)
+            return False
+
+    if _run(["schtasks", "/change", "/tn", TASK_NAME, "/disable"], "schtasks /change /disable"):
+        return True
+    if _run(
+        ["powershell", "-NoProfile", "-Command",
+         f"Disable-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop"],
+        "powershell Disable-ScheduledTask",
+    ):
+        return True
+    if _run(["schtasks", "/delete", "/tn", TASK_NAME, "/f"], "schtasks /delete /f"):
+        return True
+    log.error("ВСЕ способы disable schedule failed — задача продолжит стрелять")
+    return False
 
 
 def load_session_imported_flag() -> tuple[str | None, str | None]:
@@ -438,19 +471,30 @@ def run() -> int:
         password = creds.get("account", "password")
 
         # One-shot гейт: уже прогрели целевой объём? — JOB DONE, на выход.
+        # Уведомление шлём РОВНО один раз (флаг .notified_done). Если scheduler
+        # всё ещё стреляет (significa disable не сработал на прошлом запуске)
+        # — пытаемся ещё раз, но без спама в ntfy.
         target = load_or_create_target(cfg)
         current = load_warmed_count()
         if current >= target:
-            log.info("ALL JOBS DONE: %d/%d URL прогрето, scheduled task disabled", current, target)
-            disable_scheduled_task()
+            if already_notified_done():
+                log.info("ALL JOBS DONE: %d/%d, уже уведомлял — тихий ретрай disable", current, target)
+                disable_scheduled_task()
+                return 0
+            log.info("ALL JOBS DONE: %d/%d URL прогрето — disable + notify", current, target)
+            disabled = disable_scheduled_task()
+            tail = ("scheduled task disabled. All jobs done 🎉"
+                    if disabled else
+                    "could NOT disable schedule — run manually:\n"
+                    f"  schtasks /change /tn {TASK_NAME} /disable")
             notify_ntfy(
                 _ntfy_header() +
-                f"total: {current}/{target} URL warmed\n"
-                f"scheduled task disabled. All jobs done 🎉",
+                f"total: {current}/{target} URL warmed\n" + tail,
                 title="warmup all done",
                 priority="low",
                 tags="tada",
             )
+            mark_notified_done()
             return 0
         log.info("прогресс: %d/%d URL (осталось ~%d)", current, target, max(0, target - current))
 
@@ -561,16 +605,20 @@ def run() -> int:
                  elapsed / 60, chunks_done, len(chunks), urls_warmed_now, new_total, target)
 
         if target_reached:
-            disable_scheduled_task()
+            disabled = disable_scheduled_task()
+            tail = ("scheduled task disabled. All jobs done."
+                    if disabled else
+                    "could NOT disable schedule — run manually:\n"
+                    f"  schtasks /change /tn {TASK_NAME} /disable")
             notify_ntfy(
                 _ntfy_header() +
                 f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
-                f"total: {new_total}/{target} URL — target reached 🎉\n"
-                f"scheduled task disabled. All jobs done.",
+                f"total: {new_total}/{target} URL — target reached 🎉\n" + tail,
                 title="warmup all done",
                 priority="low",
                 tags="tada",
             )
+            mark_notified_done()
         else:
             notify_ntfy(
                 _ntfy_header() +
