@@ -1,0 +1,53 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
+REM Fresh restart from the "after notepad" phase. Use when LS hangs or you
+REM want to re-run warmup from a clean slate WITHOUT reinstalling Git /
+REM Python / Linken Sphere / re-entering credentials.
+REM
+REM What this does:
+REM   1. Kills any running Linken Sphere processes (frees hung session).
+REM   2. Deletes warmup state: .session_name / .session_imported /
+REM      .api_activated / .warmup_state / .warmup_target / .warmup_count /
+REM      .notified_done / .first_start / session_imports\CL-*.xlsx /
+REM      screenshots\ / *.log
+REM   3. Re-enables the scheduled task (in case it was auto-disabled).
+REM   4. Triggers the task immediately - no need to wait 52 minutes.
+REM
+REM Does NOT touch:
+REM   credentials.ini, config.ini, templates\, urls\, requirements.txt.
+
+echo.
+echo [fresh] killing Linken Sphere processes...
+taskkill /F /IM "Linken Sphere 2.exe" /T >nul 2>&1
+
+echo [fresh] cleaning warmup state...
+if exist "%~dp0.session_name"     del /q "%~dp0.session_name"
+if exist "%~dp0.session_imported" del /q "%~dp0.session_imported"
+if exist "%~dp0.api_activated"    del /q "%~dp0.api_activated"
+if exist "%~dp0.warmup_state"     del /q "%~dp0.warmup_state"
+if exist "%~dp0.warmup_target"    del /q "%~dp0.warmup_target"
+if exist "%~dp0.warmup_count"     del /q "%~dp0.warmup_count"
+if exist "%~dp0.notified_done"    del /q "%~dp0.notified_done"
+if exist "%~dp0.first_start"      del /q "%~dp0.first_start"
+
+for /f "delims=" %%f in ('dir /b /a-d "%~dp0session_imports\CL-*.xlsx" 2^>nul') do (
+    del /q "%~dp0session_imports\%%f"
+)
+
+if exist "%~dp0screenshots\"   rmdir /s /q "%~dp0screenshots\"
+if exist "%~dp0warmup.log"     del /q "%~dp0warmup.log"
+if exist "%~dp0warmup_api.log" del /q "%~dp0warmup_api.log"
+
+echo [fresh] re-enabling scheduled task...
+schtasks /change /tn LinkenSphereWarmup /enable >nul 2>&1
+
+echo [fresh] triggering warmup NOW...
+schtasks /run /tn LinkenSphereWarmup
+
+echo.
+echo [fresh] done. UI flow starts within seconds.
+echo         Watch ntfy / Telegram for the next push.
+echo         Note: the LS ghost session may stay inside Linken Sphere -
+echo         it is harmless, next run creates a fresh CL-XXXXXXXX next to it.
