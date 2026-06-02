@@ -308,10 +308,15 @@ def _ntfy_header() -> str:
     return f"session: {sess}\nmachine: {socket.gethostname()}\n"
 
 
-def notify_ntfy(message: str, title: str = "warmup failed") -> None:
+def notify_ntfy(message: str, title: str = "warmup failed",
+                priority: str = "high", tags: str = "warning") -> None:
     """Шлёт push через ntfy.sh без какой-либо настройки на машине.
     Все ошибки (сети нет, сервис лежит, и т.д.) глотаются — нотификация
-    никогда не должна мешать основному логированию."""
+    никогда не должна мешать основному логированию.
+
+    Дефолт priority/tags = high/warning рассчитан на сообщения о падении.
+    Для успешных уведомлений вызывающий передаёт low/white_check_mark —
+    чтобы «OK» приходили тихими и зелёными, как в API-флоу."""
     try:
         import urllib.request
         url = f"https://ntfy.sh/{NTFY_TOPIC}"
@@ -324,8 +329,8 @@ def notify_ntfy(message: str, title: str = "warmup failed") -> None:
             method="POST",
             headers={
                 "Title": title,
-                "Priority": "high",
-                "Tags": "warning",
+                "Priority": priority,
+                "Tags": tags,
             },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1637,6 +1642,8 @@ def run() -> int:
                     _ntfy_header() +
                     f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}",
                     title="warmup OK",
+                    priority="low",
+                    tags="white_check_mark",
                 )
             except Exception:
                 pass
