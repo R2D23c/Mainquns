@@ -43,9 +43,14 @@ echo.
 %PY% -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 goto install_failed
 
-echo %PY%> "%~dp0.python_cmd"
+REM Resolve %PY% to an ABSOLUTE python.exe path. Task Scheduler service can
+REM run with a stale PATH (env block captured before Python was installed),
+REM so 'py' / 'python' may not resolve when the task fires - Last Result 1
+REM with no log entry. Absolute path is immune to PATH state.
+for /f "delims=" %%i in ('%PY% -c "import sys; print(sys.executable)"') do set "PYEXE=%%i"
+> "%~dp0.python_cmd" echo "%PYEXE%"
 echo.
-echo [OK] dependencies installed via %PY%.
+echo [OK] dependencies installed via %PY% (resolved to "%PYEXE%").
 
 REM --- Linken Sphere 2 ---
 set "LS_PATH=C:\Program Files (x86)\Linken Sphere 2\Linken Sphere 2.exe"
