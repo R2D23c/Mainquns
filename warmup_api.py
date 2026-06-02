@@ -447,6 +447,17 @@ class ApiClient:
         }
         return self._request("POST", ENDPOINTS["start_warmup"], body)
 
+    def stop_warmup(self, uuid: str) -> dict | list | None:
+        """Останавливает прогрев на КОНКРЕТНОЙ сессии (только uuid из аргумента).
+        Используем в двух местах:
+          1. На выходе при ошибке — освободить свою сессию, чтобы следующий
+             scheduler-trigger не получил 409 от нашего же зомби.
+          2. Перед стартом нового чанка если pre-check показал, что сессия
+             ещё в каком-то нестабильном статусе.
+        Безопасно: трогает СТРОГО переданный uuid. Чужие сессии того же
+        LS-аккаунта (на других VPS) не задеваются."""
+        return self._request("POST", ENDPOINTS["stop_warmup"], {"uuid": uuid})
+
     def get_session_state(self, uuid: str) -> dict | None:
         """Состояние конкретной сессии. Сначала пробуем GET /sessions/{uuid},
         при 404 — fallback на список."""
@@ -462,9 +473,17 @@ class ApiClient:
         return None
 
 
-# LS API: поле статуса — `status`, значения из доки:
-#   ["running", "stopped", "imported", "warmup", "automationRunning"]
-# Прогрев идёт == status == "warmup". Финал == status вышел из этого значения.
+# LS API: поле статуса — `status`. Известные значения (из доки + наблюдения):
+#   warmup            — идёт наш прогрев (продолжаем поллить)
+#   automationRunning — идёт другая автоматизация (продолжаем поллить)
+#   running           — браузер открыт без автоматизации (продолжаем поллить)
+#   stopped           — простаивает, ГОТОВА к следующей операции
+#   imported          — только что импортирована, ГОТОВА
+# Терминальные («можно стартовать следующий чанк»): stopped, imported.
+# Всё остальное (включая, например, гипотетический «saving») — ЖДЁМ.
+# Если ждать «status != warmup» как раньше, то при переходе warmup→saving
+# мы решали «готово» слишком рано → следующий start_warmup ловил 409.
+TERMINAL_STATUSES = ("stopped", "imported")
 WARMUP_STATUS = "warmup"
 
 
@@ -474,7 +493,7 @@ def _is_warmup_done(state: dict | None) -> bool:
     status = state.get("status")
     if not isinstance(status, str):
         return False
-    return status != WARMUP_STATUS
+    return status in TERMINAL_STATUSES
 
 
 def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigParser) -> bool:
@@ -595,10 +614,11 @@ def run() -> int:
                 log.info("=" * 50)
                 log.info("чанк %d/%d (%d URL) — start_warmup", i, len(chunks), len(chunk))
                 # Retry на HTTP 409 «Session is used by another client or
-                # operation». Эта ошибка ловится между чанками: предыдущий
-                # warmup уже отдал status != "warmup", но LS внутри ещё
-                # закрывает браузерные процессы и держит сессию занятой.
-                # 3 попытки: первая сразу, потом ждём 15с / 30с.
+                # operation». Ловится либо когда LS внутри ещё не успела
+                # перейти в stopped/imported после предыдущего чанка, либо
+                # когда зомби-сессия с прошлого падения держит глобальный
+                # API-лок. 3 попытки с расширенными ретраями: 30с / 60с
+                # (всего ~1.5 мин запаса).
                 _last_err: Exception | None = None
                 for attempt in range(3):
                     try:
@@ -611,7 +631,7 @@ def run() -> int:
                         _last_err = e
                         if not retriable or attempt == 2:
                             break
-                        wait = 15 * (attempt + 1)  # 15, 30
+                        wait = 30 * (attempt + 1)  # 30, 60
                         log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/3",
                                     i, wait, attempt + 2)
                         time.sleep(wait)
@@ -674,6 +694,18 @@ def run() -> int:
 
     except Exception as exc:
         log.exception("сценарий упал: %s", exc)
+        # Перед выходом ПЫТАЕМСЯ освободить НАШУ сессию, чтобы следующий
+        # scheduler-trigger не получил 409 от нашего же зомби. Строго наш
+        # uuid из локалов, чужие сессии аккаунта не трогаем. Если uuid
+        # ещё не определён (упало на signin/lookup) — пропускаем тихо.
+        try:
+            _our_uuid = locals().get("uuid")
+            if _our_uuid and "client" in locals():
+                log.info("освобождаю свою сессию: stop_warmup(%s)", _our_uuid)
+                client.stop_warmup(_our_uuid)  # type: ignore[name-defined]
+        except Exception as e:
+            log.warning("stop_warmup на выходе не сработал: %s", e)
+
         tail = ""
         if LOG_FILE.exists():
             try:
@@ -681,9 +713,23 @@ def run() -> int:
                     tail = "".join(f.readlines()[-15:])
             except Exception:
                 pass
+
+        # Спец-хинт для самой коварной ошибки — 409 «Session is used by
+        # another client or operation». Чаще всего значит, что в LS висит
+        # зомби-сессия (saving / warmup от прошлого падения) с другим uuid
+        # и держит ГЛОБАЛЬНЫЙ API-лок. Чистится только руками через LS UI.
+        hint = ""
+        if "HTTP 409" in str(exc) and "Session is used" in str(exc):
+            hint = (
+                "\nlikely a zombie session is holding the global LS API lock.\n"
+                "open LS UI → right-click any session in 'Saving data...' or\n"
+                "stuck 'warmup' status → Delete. Then re-run, or wait for\n"
+                "the next scheduled trigger.\n"
+            )
+
         notify_ntfy(
             _ntfy_header() +
-            f"error: {exc}\n\n"
+            f"error: {exc}\n" + hint + "\n"
             f"tail:\n{tail}",
             title="warmup failed (api)",
             priority="high",
