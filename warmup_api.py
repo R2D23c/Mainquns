@@ -199,8 +199,8 @@ def load_or_create_target(cfg: configparser.ConfigParser) -> int:
             return int(WARMUP_TARGET_FILE.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pass
-    lo = cfg.getint("api", "urls_total_target_min", fallback=400)
-    hi = cfg.getint("api", "urls_total_target_max", fallback=600)
+    lo = cfg.getint("api", "urls_total_target_min", fallback=300)
+    hi = cfg.getint("api", "urls_total_target_max", fallback=500)
     target = random.randint(lo, hi)
     WARMUP_TARGET_FILE.write_text(str(target), encoding="utf-8")
     log.info("целевой объём прогрева: %d URL (зафиксирован в .warmup_target)", target)
