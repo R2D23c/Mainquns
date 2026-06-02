@@ -121,22 +121,43 @@ def load_session_name() -> str:
     )
 
 
+# Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
+# подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
+_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️"}
+# ntfy JSON-priority — число 1..5. Маппим из наших строковых уровней.
+_PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
+
+
 def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
-    """Шлёт push через ntfy.sh. Ошибки глотаем — нотификация не должна валить запуск."""
+    """Шлёт push через ntfy.sh JSON-публикацией. Ошибки глотаем — нотификация
+    не должна валить запуск.
+
+    Почему JSON, а не HTTP-заголовки: в заголовки HTTP нельзя положить
+    эмодзи/UTF-8 (только ASCII), поэтому раньше Title в Telegram приходил
+    без иконки. В JSON-теле title/tags — обычные строки, json.dumps сам
+    экранирует Unicode в \\uXXXX, тело уходит чистым ASCII — ничего не
+    ломается ни на каком codepage."""
     try:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        emoji = _TAG_EMOJI.get(tag_list[0], "") if tag_list else ""
+        disp_title = f"{emoji} {title}".strip()
+        payload = {
+            "topic": NTFY_TOPIC,
+            "title": disp_title,
+            "message": message[:4000],
+            "priority": _PRIORITY_NUM.get(priority, 3),
+            "tags": tag_list,
+        }
+        data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=message[:4000].encode("utf-8"),
+            "https://ntfy.sh",
+            data=data,
             method="POST",
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": tags,
-            },
+            headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
-        log.info("ntfy отправлен (%s, %s)", title, priority)
+        log.info("ntfy отправлен (%s, %s)", disp_title, priority)
     except Exception as e:
         log.warning("notify_ntfy failed: %s", e)
 

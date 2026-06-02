@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import configparser
 import ctypes
+import json
 import logging
 import os
 import random
@@ -308,34 +309,46 @@ def _ntfy_header() -> str:
     return f"session: {sess}\nmachine: {socket.gethostname()}\n"
 
 
+# Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
+# подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
+_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️"}
+_PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
+
+
 def notify_ntfy(message: str, title: str = "warmup failed",
                 priority: str = "high", tags: str = "warning") -> None:
-    """Шлёт push через ntfy.sh без какой-либо настройки на машине.
+    """Шлёт push через ntfy.sh JSON-публикацией, без настройки на машине.
     Все ошибки (сети нет, сервис лежит, и т.д.) глотаются — нотификация
     никогда не должна мешать основному логированию.
 
     Дефолт priority/tags = high/warning рассчитан на сообщения о падении.
-    Для успешных уведомлений вызывающий передаёт low/white_check_mark —
-    чтобы «OK» приходили тихими и зелёными, как в API-флоу."""
+    Для успешных уведомлений вызывающий передаёт low/white_check_mark.
+
+    JSON, а не HTTP-заголовки: в заголовки нельзя положить эмодзи (только
+    ASCII), поэтому Title в Telegram приходил без иконки. В JSON-теле
+    json.dumps экранирует Unicode в \\uXXXX — тело уходит чистым ASCII."""
     try:
         import urllib.request
-        url = f"https://ntfy.sh/{NTFY_TOPIC}"
-        # Тело — текст уведомления. Header Title — заголовок (ASCII, чтобы
-        # без проблем пролезть через HTTP-заголовки). Priority/Tags —
-        # косметика для приложения ntfy.
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        emoji = _TAG_EMOJI.get(tag_list[0], "") if tag_list else ""
+        disp_title = f"{emoji} {title}".strip()
+        payload = {
+            "topic": NTFY_TOPIC,
+            "title": disp_title,
+            "message": message[:4000],
+            "priority": _PRIORITY_NUM.get(priority, 3),
+            "tags": tag_list,
+        }
+        data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url,
-            data=message[:4000].encode("utf-8"),
+            "https://ntfy.sh",
+            data=data,
             method="POST",
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": tags,
-            },
+            headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
-        log.info("ntfy-уведомление отправлено")
+        log.info("ntfy-уведомление отправлено (%s)", disp_title)
     except Exception as e:
         log.warning("notify_ntfy failed: %s", e)
 
