@@ -70,6 +70,9 @@ SUCCESS_STATE_FILE = ROOT / ".warmup_state"
 # Сгенерированное имя сессии этой машины (формат CL-XXXXXXXX, 8 цифр).
 # Создаётся один раз — на первой инсталляции — и больше не меняется.
 SESSION_NAME_FILE = ROOT / ".session_name"
+# Дата первого старта машины (пишется один раз). hostname у VPS часто
+# одинаковый (admin/admin), дата помогает их различать в уведомлениях.
+FIRST_START_FILE = ROOT / ".first_start"
 # Флаг, что в LS активирован API-порт (Settings → Network → Api port).
 # Если флаг есть — UI-активацию пропускаем, дальше всё через HTTP.
 API_ACTIVATED_FLAG = ROOT / ".api_activated"
@@ -297,16 +300,32 @@ def _write_success_count(n: int) -> None:
         log.warning("не удалось записать %s: %s", SUCCESS_STATE_FILE, e)
 
 
+def _machine_id() -> str:
+    """hostname + дата первого старта (формат «Akopto · 2026-06-02 14:23»).
+    Дата фиксируется один раз в .first_start и больше не меняется — это
+    стабильный различитель машин, когда hostname у всех одинаковый."""
+    import socket
+    host = socket.gethostname()
+    try:
+        if FIRST_START_FILE.exists():
+            stamp = FIRST_START_FILE.read_text(encoding="utf-8").strip()
+        else:
+            stamp = time.strftime("%Y-%m-%d %H:%M")
+            FIRST_START_FILE.write_text(stamp, encoding="utf-8")
+    except OSError:
+        stamp = ""
+    return f"{host} · {stamp}" if stamp else host
+
+
 def _ntfy_header() -> str:
     """Единый префикс для всех ntfy-сообщений: session + machine.
     session ВСЕГДА первым — на телефоне его удобно ловить глазом,
     т.к. имена машин (hostname) могут совпадать между VPS."""
-    import socket
     try:
         sess = load_session_name()
     except Exception:
         sess = "<unknown>"
-    return f"session: {sess}\nmachine: {socket.gethostname()}\n"
+    return f"session: {sess}\nmachine: {_machine_id()}\n"
 
 
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ

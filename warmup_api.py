@@ -45,6 +45,10 @@ SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 # .warmup_count — суммарно прогрето URL с момента инсталляции.
 WARMUP_TARGET_FILE = ROOT / ".warmup_target"
 WARMUP_COUNT_FILE = ROOT / ".warmup_count"
+# Дата первого старта этой машины (пишется один раз). Нужна потому, что
+# у разных VPS часто одинаковый hostname (admin/admin) — по дате старта
+# их легко различать в ленте уведомлений.
+FIRST_START_FILE = ROOT / ".first_start"
 # Флаг «done-уведомление уже отправлено». Если scheduler по какой-то
 # причине ещё стреляет (schtasks /disable не сработал), мы НЕ шлём
 # повторные «all jobs done» — просто тихо пытаемся ещё раз отключить
@@ -162,6 +166,22 @@ def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
+def _machine_id() -> str:
+    """hostname + дата первого старта (формат «Akopto · 2026-06-02 14:23»).
+    Дата фиксируется один раз в .first_start и больше не меняется — это
+    стабильный различитель машин, когда hostname у всех одинаковый."""
+    host = socket.gethostname()
+    try:
+        if FIRST_START_FILE.exists():
+            stamp = FIRST_START_FILE.read_text(encoding="utf-8").strip()
+        else:
+            stamp = time.strftime("%Y-%m-%d %H:%M")
+            FIRST_START_FILE.write_text(stamp, encoding="utf-8")
+    except OSError:
+        stamp = ""
+    return f"{host} · {stamp}" if stamp else host
+
+
 def _ntfy_header() -> str:
     """Единый префикс для всех ntfy-сообщений: session + machine.
     session ВСЕГДА первым — на телефоне его удобно ловить глазом,
@@ -170,7 +190,7 @@ def _ntfy_header() -> str:
         sess = load_session_name()
     except Exception:
         sess = "<unknown>"
-    return f"session: {sess}\nmachine: {socket.gethostname()}\n"
+    return f"session: {sess}\nmachine: {_machine_id()}\n"
 
 
 def load_url_pool(cfg: configparser.ConfigParser) -> list[str]:

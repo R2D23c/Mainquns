@@ -13,6 +13,7 @@ credentials.ini
 .warmup_target
 .warmup_count
 .notified_done
+.first_start
 warmup_api.log
 session_imports/CL-*.xlsx
 urls_generated/

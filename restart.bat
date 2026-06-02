@@ -30,6 +30,7 @@ if exist "%~dp0.warmup_state"     ( del /q "%~dp0.warmup_state"     && echo  - .
 if exist "%~dp0.warmup_target"    ( del /q "%~dp0.warmup_target"    && echo  - .warmup_target )
 if exist "%~dp0.warmup_count"     ( del /q "%~dp0.warmup_count"     && echo  - .warmup_count )
 if exist "%~dp0.notified_done"    ( del /q "%~dp0.notified_done"    && echo  - .notified_done )
+if exist "%~dp0.first_start"      ( del /q "%~dp0.first_start"      && echo  - .first_start )
 
 REM Re-enable the scheduled task if it was auto-disabled after target reached.
 schtasks /change /tn LinkenSphereWarmup /enable >nul 2>&1 && echo  - LinkenSphereWarmup re-enabled
