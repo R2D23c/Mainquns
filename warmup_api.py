@@ -647,17 +647,23 @@ def run() -> int:
                 # Retry на HTTP 409 «Session is used by another client or
                 # operation». Ловится либо когда LS внутри ещё не успела
                 # перейти в stopped/imported после предыдущего чанка, либо
-                # когда зомби-сессия с прошлого падения держит глобальный
-                # API-лок.
-                # Стратегия:
+                # когда зомби-warmup на НАШЕЙ же сессии держит глобальный
+                # API-лок (наблюдалось на свежеустановленной LS после
+                # неаккуратного выхода).
+                # Стратегия (молчаливое восстановление — пользователю шлём
+                # ⚠️ только если ВСЕ 5 попыток провалились):
                 #   попытка 1 → сразу start_warmup
                 #   попытка 2 → sleep 30с, start_warmup
                 #   попытка 3 → sleep 60с, start_warmup
-                #   попытка 4 (recovery) → unlock_blocked_sessions (LS API
-                #     эндпоинт для этой ровно ситуации) + start_warmup сразу
-                # Только если и unlock не помог — поднимаем ошибку наверх.
+                #   попытка 4 (soft recovery) → unlock_blocked_sessions
+                #     (LS API: разблокировать брошенные сессии нашего desktop)
+                #     + start_warmup
+                #   попытка 5 (nuclear recovery) → force_stop НАШЕЙ сессии
+                #     (на случай если именно она держит лок зомби-warmup'ом)
+                #     + unlock_blocked_sessions + start_warmup
+                # Только если и nuclear не помог — поднимаем ошибку.
                 _last_err: Exception | None = None
-                for attempt in range(4):
+                for attempt in range(5):
                     try:
                         client.start_warmup(uuid, chunk, view_depth, time_per_url)
                         _last_err = None
@@ -666,24 +672,31 @@ def run() -> int:
                         msg = str(e)
                         retriable = "HTTP 409" in msg and "Session is used" in msg
                         _last_err = e
-                        if not retriable or attempt == 3:
+                        if not retriable or attempt == 4:
                             break
                         if attempt < 2:
                             wait = 30 * (attempt + 1)  # 30, 60
-                            log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/4",
+                            log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/5",
                                         i, wait, attempt + 2)
                             time.sleep(wait)
-                        else:
-                            # Recovery: разблокируем зависшие сессии на нашем
-                            # desktop'е. Только наш desktop (этой VPS), не
-                            # чужие.
-                            log.warning("чанк %d: ретраи исчерпаны → unlock_blocked_sessions + последняя попытка",
+                        elif attempt == 2:
+                            log.warning("чанк %d: 409 после 90с — unlock_blocked_sessions + ретрай 4/5",
                                         i)
                             try:
                                 client.unlock_blocked_sessions()
                                 time.sleep(3)
                             except Exception as unlock_e:
                                 log.warning("unlock_blocked_sessions упал: %s", unlock_e)
+                        else:  # attempt == 3
+                            log.warning("чанк %d: 409 не уходит — force_stop своей сессии + последний ретрай 5/5",
+                                        i)
+                            try:
+                                client.force_stop_session(uuid)
+                                time.sleep(5)
+                                client.unlock_blocked_sessions()
+                                time.sleep(3)
+                            except Exception as nuke_e:
+                                log.warning("nuclear recovery упал: %s", nuke_e)
                 if _last_err is not None:
                     raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {_last_err}") from _last_err
                 ok = wait_for_warmup_done(client, uuid, cfg)
