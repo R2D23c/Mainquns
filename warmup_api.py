@@ -716,23 +716,11 @@ def run() -> int:
 
         # Спец-хинт для самой коварной ошибки — 409 «Session is used by
         # another client or operation». Чаще всего значит, что в LS висит
-        # ОДНА зомби-сессия (saving / warmup от прошлого падения) и держит
+        # зомби-сессия (saving / warmup от прошлого падения) и держит
         # ГЛОБАЛЬНЫЙ API-лок. Чистится только руками через LS UI.
-        # ВАЖНО: НЕ говорить юзеру «удали все CL-*» — на том же LS-аккаунте
-        # могут быть легитимные CL-* сессии других VPS. Указываем строго на
-        # ОДНУ зависшую + явно предупреждаем НЕ трогать нашу текущую.
         hint = ""
         if "HTTP 409" in str(exc) and "Session is used" in str(exc):
-            _our_name = locals().get("session_name") or "(см. session: выше)"
-            hint = (
-                "\nlikely ONE stuck session from a previous failed run is\n"
-                "holding the LS API lock (cloud sync hung on 'Saving data').\n"
-                "open LS UI → find that ONE session stuck in 'Saving data...'\n"
-                f"or stuck 'warmup' status → right-click → Delete.\n"
-                f"DO NOT delete this machine's current session: {_our_name}\n"
-                "DO NOT delete sessions from your other VPS (different CL-* names)\n"
-                "are running fine — only the visibly stuck one needs to go.\n"
-            )
+            hint = "\nзависшая сессия держит LS API. LS UI → удали сессию в 'Saving data...' → перезапусти.\n"
 
         notify_ntfy(
             _ntfy_header() +
