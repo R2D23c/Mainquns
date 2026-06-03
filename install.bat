@@ -105,6 +105,15 @@ echo Install complete.
 echo Linken Sphere installed, Python deps installed, credentials saved.
 echo.
 
+REM В unattended режиме (env var WARMUP_UNATTENDED=1 от setup.ps1) НЕ ждём
+REM нажатия клавиши — setup.ps1 сам продолжит к schedule_hourly.bat.
+REM Используется когда оператор выставил LS_EMAIL/LS_PASSWORD перед iex
+REM (типично — для параллельного запуска на N машинах сразу).
+if "%WARMUP_UNATTENDED%"=="1" (
+    echo [unattended] skipping interactive pause
+    exit /b 0
+)
+
 REM Большой зелёный prompt чтобы юзер не закрыл окно решив что установка
 REM завершилась полностью. На самом деле дальше setup.ps1 пойдёт в
 REM schedule_hourly.bat — нужен один key-press чтобы продолжить.

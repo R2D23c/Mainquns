@@ -121,6 +121,21 @@ if (-not $isAdmin) {
     exit 1
 }
 
+# 0.5 Unattended mode detection.
+# Если перед запуском оператор выставил $env:LS_EMAIL и $env:LS_PASSWORD —
+# работаем БЕЗ интерактивных пауз: пишем credentials.ini сами, install.bat
+# пропускает Notepad-step, финальный PRESS-ANY-KEY баннер тоже не показываем.
+# Это позволяет открыть N RDP параллельно и поставить везде одну команду —
+# каждая машина сама всё сделает до конца.
+$preloadEmail = $env:LS_EMAIL
+$preloadPassword = $env:LS_PASSWORD
+$unattended = $false
+if ($preloadEmail -and $preloadPassword) {
+    Write-Step "Unattended mode: LS_EMAIL/LS_PASSWORD detected — Notepad will be skipped"
+    $unattended = $true
+    $env:WARMUP_UNATTENDED = "1"
+}
+
 # 1. Git
 Install-Git
 
@@ -140,10 +155,22 @@ if (-not (Test-Path $repoDir)) {
 }
 Set-Location $repoDir
 
+# 3.5 Pre-write credentials.ini in unattended mode — install.bat увидит что
+# файл уже существует и не будет открывать Notepad.
+if ($unattended) {
+    $credPath = Join-Path $repoDir "credentials.ini"
+    $iniContent = "[account]`r`nemail = $preloadEmail`r`npassword = $preloadPassword`r`n"
+    # UTF-8 БЕЗ BOM — Python configparser плохо реагирует на BOM в первой строке.
+    [System.IO.File]::WriteAllText($credPath, $iniContent, [System.Text.UTF8Encoding]::new($false))
+    Write-Step "credentials.ini written from env vars (Notepad step skipped)"
+}
+
 # 4. install.bat - Python deps + Linken Sphere + opens credentials.ini
 Write-Step "Running install.bat (deps + Linken Sphere + credentials.ini)"
-Write-Host "  -> When Notepad opens, enter your email/password, save (Ctrl+S), close." -ForegroundColor Yellow
-Write-Host "  -> Then press any key in this window to continue." -ForegroundColor Yellow
+if (-not $unattended) {
+    Write-Host "  -> When Notepad opens, enter your email/password, save (Ctrl+S), close." -ForegroundColor Yellow
+    Write-Host "  -> Then press any key in this window to continue." -ForegroundColor Yellow
+}
 cmd /c "install.bat"
 
 # 5. schedule_hourly.bat - register the Task Scheduler job
