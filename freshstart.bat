@@ -10,7 +10,8 @@ REM What this does:
 REM   1. Kills any running Linken Sphere processes (frees hung session).
 REM   2. Deletes warmup state: .session_name / .session_imported /
 REM      .api_activated / .warmup_state / .warmup_target / .warmup_count /
-REM      .notified_done / .first_start / session_imports\CL-*.xlsx /
+REM      .warmup_started_at / .notified_done / .first_start /
+REM      session_imports\CL-*.xlsx /
 REM      screenshots\ / *.log
 REM   3. Re-enables the scheduled task (in case it was auto-disabled).
 REM   4. Triggers the task immediately - no need to wait 52 minutes.
@@ -29,6 +30,7 @@ if exist "%~dp0.api_activated"    del /q "%~dp0.api_activated"
 if exist "%~dp0.warmup_state"     del /q "%~dp0.warmup_state"
 if exist "%~dp0.warmup_target"    del /q "%~dp0.warmup_target"
 if exist "%~dp0.warmup_count"     del /q "%~dp0.warmup_count"
+if exist "%~dp0.warmup_started_at" del /q "%~dp0.warmup_started_at"
 if exist "%~dp0.notified_done"    del /q "%~dp0.notified_done"
 if exist "%~dp0.first_start"      del /q "%~dp0.first_start"
 

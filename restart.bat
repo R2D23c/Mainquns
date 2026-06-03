@@ -29,6 +29,7 @@ if exist "%~dp0.api_activated"    ( del /q "%~dp0.api_activated"    && echo  - .
 if exist "%~dp0.warmup_state"     ( del /q "%~dp0.warmup_state"     && echo  - .warmup_state )
 if exist "%~dp0.warmup_target"    ( del /q "%~dp0.warmup_target"    && echo  - .warmup_target )
 if exist "%~dp0.warmup_count"     ( del /q "%~dp0.warmup_count"     && echo  - .warmup_count )
+if exist "%~dp0.warmup_started_at" ( del /q "%~dp0.warmup_started_at" && echo  - .warmup_started_at )
 if exist "%~dp0.notified_done"    ( del /q "%~dp0.notified_done"    && echo  - .notified_done )
 if exist "%~dp0.first_start"      ( del /q "%~dp0.first_start"      && echo  - .first_start )
 

@@ -45,6 +45,10 @@ SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 # .warmup_count — суммарно прогрето URL с момента инсталляции.
 WARMUP_TARGET_FILE = ROOT / ".warmup_target"
 WARMUP_COUNT_FILE = ROOT / ".warmup_count"
+# UNIX-таймстемп ПЕРВОГО запуска (когда сгенерили target). Нужен чтобы
+# в финальной "all done" нотификации показать общее время задачи
+# целиком — от первого тика scheduler до достижения target.
+WARMUP_STARTED_AT_FILE = ROOT / ".warmup_started_at"
 # Дата первого старта этой машины (пишется один раз). Нужна потому, что
 # у разных VPS часто одинаковый hostname (admin/admin) — по дате старта
 # их легко различать в ленте уведомлений.
@@ -262,8 +266,29 @@ def load_or_create_target(cfg: configparser.ConfigParser) -> int:
     hi = cfg.getint("api", "urls_total_target_max", fallback=500)
     target = random.randint(lo, hi)
     WARMUP_TARGET_FILE.write_text(str(target), encoding="utf-8")
+    WARMUP_STARTED_AT_FILE.write_text(str(int(time.time())), encoding="utf-8")
     log.info("целевой объём прогрева: %d URL (зафиксирован в .warmup_target)", target)
     return target
+
+
+def load_started_at() -> int | None:
+    if not WARMUP_STARTED_AT_FILE.exists():
+        return None
+    try:
+        return int(WARMUP_STARTED_AT_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
+
+
+def _fmt_total_elapsed(started_at: int | None) -> str:
+    if started_at is None:
+        return "n/a (нет .warmup_started_at)"
+    secs = max(0, int(time.time() - started_at))
+    h, rem = divmod(secs, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"{h}ч {m}мин"
+    return f"{m} мин"
 
 
 def load_warmed_count() -> int:
@@ -729,6 +754,7 @@ def run() -> int:
 
         if target_reached:
             disabled = disable_scheduled_task()
+            total_elapsed = _fmt_total_elapsed(load_started_at())
             tail = ("scheduled task disabled. All jobs done."
                     if disabled else
                     "could NOT disable schedule — run manually:\n"
@@ -736,7 +762,8 @@ def run() -> int:
             notify_ntfy(
                 _ntfy_header() +
                 f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
-                f"total: {new_total}/{target} URL — target reached 🎉\n" + tail,
+                f"total: {new_total}/{target} URL — target reached 🎉\n"
+                f"total time: {total_elapsed}\n" + tail,
                 title="warmup all done",
                 priority="low",
                 tags="tada",
