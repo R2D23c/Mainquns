@@ -102,9 +102,18 @@ if not exist "%~dp0credentials.ini" (
 
 echo.
 echo Install complete.
-echo Next: run schedule_hourly.bat (as admin) and walk away.
-echo First scheduled trigger does login + API port activation + session import.
-echo Subsequent triggers - chunked API warmup.
+echo Linken Sphere installed, Python deps installed, credentials saved.
+echo.
+
+REM Большой зелёный prompt чтобы юзер не закрыл окно решив что установка
+REM завершилась полностью. На самом деле дальше setup.ps1 пойдёт в
+REM schedule_hourly.bat — нужен один key-press чтобы продолжить.
+REM PowerShell embedded — гарантированно работает на Win10/11/Server 2019+.
+REM Если по экзотической причине powershell.exe не запустится, регулярный
+REM pause ниже всё равно прозвучит как "Press any key to continue . . ."
+REM и юзер всё равно нажмёт. Zero regression.
+powershell -NoProfile -Command "Write-Host ''; Write-Host '   ===================================================' -ForegroundColor Green; Write-Host ''; Write-Host '         >>>  PRESS ANY KEY TO CONTINUE  <<<' -ForegroundColor Green; Write-Host '         Next step: register Task Scheduler job' -ForegroundColor Green; Write-Host ''; Write-Host '   ===================================================' -ForegroundColor Green; Write-Host ''"
+
 pause
 exit /b 0
 
