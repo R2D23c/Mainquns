@@ -1225,12 +1225,15 @@ def ensure_linken_sphere_running(cfg: configparser.ConfigParser) -> None:
     exe_name = os.path.basename(path)
 
     # Мягкое закрытие (WM_CLOSE)
-    r = subprocess.run(["taskkill", "/im", exe_name], capture_output=True, text=True)
+    # errors="replace" — taskkill пишет в OEM-codepage (cp866 на RU Windows),
+    # Python text=True декодит через ANSI cp1251 → UnicodeDecodeError на
+    # некоторых байтах. Заменяем неудачные байты, не падаем.
+    r = subprocess.run(["taskkill", "/im", exe_name], capture_output=True, text=True, errors="replace")
     log.info("taskkill soft: stdout=%r stderr=%r", r.stdout.strip(), r.stderr.strip())
     time.sleep(3.0)
 
     # Принудительное завершение остатков
-    r = subprocess.run(["taskkill", "/f", "/im", exe_name, "/t"], capture_output=True, text=True)
+    r = subprocess.run(["taskkill", "/f", "/im", exe_name, "/t"], capture_output=True, text=True, errors="replace")
     log.info("taskkill force: stdout=%r stderr=%r", r.stdout.strip(), r.stderr.strip())
     time.sleep(3.0)
 

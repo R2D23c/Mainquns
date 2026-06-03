@@ -548,7 +548,7 @@ def disable_scheduled_task() -> bool:
 
     def _run(cmd: list[str], label: str) -> bool:
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=20, text=True)
+            r = subprocess.run(cmd, capture_output=True, timeout=20, text=True, errors="replace")
             if r.returncode == 0:
                 log.info("disable scheduled task: %s — OK", label)
                 return True
