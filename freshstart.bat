@@ -14,7 +14,7 @@ REM      .warmup_started_at / .notified_done / .first_start /
 REM      session_imports\CL-*.xlsx /
 REM      screenshots\ / *.log
 REM   3. Re-enables the scheduled task (in case it was auto-disabled).
-REM   4. Triggers the task immediately - no need to wait 52 minutes.
+REM   4. Triggers the task immediately - no need to wait 45 minutes.
 REM
 REM Does NOT touch:
 REM   credentials.ini, config.ini, templates\, urls\, requirements.txt.

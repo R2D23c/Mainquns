@@ -428,7 +428,7 @@ def disable_scheduled_task() -> bool:
     """Гарантированно гасит scheduled-задачу. Три уровня fallback'а, потому
     что schtasks бывает фейлится тихо (cp1251 окружение, нет прав на
     /change, путь к задаче в подпапке и т.п.) — а если задача продолжает
-    стрелять, юзер получает спам «all jobs done» каждые 52 минуты.
+    стрелять, юзер получает спам «all jobs done» каждые 45 минут.
       1) schtasks /change /tn <name> /disable
       2) powershell Disable-ScheduledTask -TaskName <name>
       3) schtasks /delete /tn <name> /f   (последний рубеж)

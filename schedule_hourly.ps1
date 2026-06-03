@@ -18,9 +18,14 @@ $action = New-ScheduledTaskAction `
     -Argument "/c `"$runCmd`"" `
     -WorkingDirectory $ScriptDir
 
+# Интервал 45 мин подобран под реальную длительность цикла warmup_api.py
+# (~37 мин: 15 чанков × 7 URL × view_depth 3). С запасом 8 мин на
+# variance (медленный VPS, лагающие страницы). НЕ ставим 40 мин: при
+# MultipleInstances=IgnoreNew любой цикл >40 мин съедает следующий
+# триггер и эффективный интервал удваивается до 80 мин.
 $trigger = New-ScheduledTaskTrigger `
     -Once -At (Get-Date).AddSeconds(15) `
-    -RepetitionInterval (New-TimeSpan -Minutes 52)
+    -RepetitionInterval (New-TimeSpan -Minutes 45)
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -44,7 +49,7 @@ Register-ScheduledTask `
 
 Write-Host ""
 Write-Host "[OK] Task '$TaskName' registered."
-Write-Host " - First trigger in 15 seconds, then every 52 minutes."
+Write-Host " - First trigger in 15 seconds, then every 45 minutes."
 Write-Host " - Calls run_api.bat. Internal logic:"
 Write-Host "     first run (no flags) -> warmup.py (UI install:"
 Write-Host "                              login, API port, session import)"
