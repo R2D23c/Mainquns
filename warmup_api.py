@@ -722,9 +722,12 @@ def run() -> int:
         if "HTTP 409" in str(exc) and "Session is used" in str(exc):
             _our_name = locals().get("session_name") or "(см. session: выше)"
             hint = (
-                "\nLS API заблокирован зависшей сессией.\n"
-                f"Открой Linken Sphere → найди сессию со статусом 'Saving data...' (НЕ {_our_name}) → правый клик → Delete.\n"
-                "Следующий scheduler-trigger подхватит сам.\n"
+                "\nкакая-то сессия в LS держит глобальный API-лок.\n"
+                "открой Linken Sphere → посмотри, у какой сессии 'Saving data...':\n"
+                f" • если это {_our_name} (наша) → freshstart.bat на этой машине\n"
+                " • если это сессия другой твоей VPS → перезапусти ТУ VPS, эту не трогай\n"
+                " • если другая старая на этой машине → правый клик → Delete\n"
+                "после этого следующий scheduler-trigger подхватит сам.\n"
             )
 
         notify_ntfy(
