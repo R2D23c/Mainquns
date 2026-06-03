@@ -29,24 +29,43 @@ function Has-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
 }
 
+function Install-GitDirect {
+    Write-Step "Downloading Git installer directly from github.com..."
+    $url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
+    $tmp = Join-Path $env:TEMP "git-installer.exe"
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
+    Write-Step "Running Git installer silently (1-2 min)..."
+    Start-Process -FilePath $tmp `
+        -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/NOCANCEL","/SP-","/CLOSEAPPLICATIONS" `
+        -Wait -NoNewWindow
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+}
+
 function Install-Git {
     if (Get-Command git -ErrorAction SilentlyContinue) {
         Write-Step "Git already installed — skip"
         return
     }
+    $wingetOk = $false
     if (Has-Winget) {
-        Write-Step "Installing Git via winget..."
-        winget install -e --id Git.Git --silent --accept-source-agreements --accept-package-agreements --scope machine
-    } else {
-        Write-Step "winget not available - downloading Git installer directly..."
-        $url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
-        $tmp = Join-Path $env:TEMP "git-installer.exe"
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
-        Write-Step "Running Git installer silently (1-2 min)..."
-        Start-Process -FilePath $tmp `
-            -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/NOCANCEL","/SP-","/CLOSEAPPLICATIONS" `
-            -Wait -NoNewWindow
-        Remove-Item $tmp -ErrorAction SilentlyContinue
+        Write-Step "Installing Git via winget (winget catalog only, skip msstore)..."
+        # --source winget — на свежей Win11/Server VPS у msstore часто
+        # битый cert ('did not match any of the expected values') → весь
+        # winget валится. Заставляем использовать только нативный
+        # winget-catalog, msstore не нужен.
+        $global:LASTEXITCODE = 0
+        try {
+            winget install -e --id Git.Git --silent `
+                --accept-source-agreements --accept-package-agreements `
+                --scope machine --source winget
+            if ($LASTEXITCODE -eq 0) { $wingetOk = $true }
+        } catch { $wingetOk = $false }
+        if (-not $wingetOk) {
+            Write-Step "[warn] winget failed (rc=$LASTEXITCODE), falling back to direct download..."
+        }
+    }
+    if (-not $wingetOk) {
+        Install-GitDirect
     }
     Refresh-Path
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -54,24 +73,39 @@ function Install-Git {
     }
 }
 
+function Install-PythonDirect {
+    Write-Step "Downloading Python 3.12 installer directly from python.org..."
+    $url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
+    $tmp = Join-Path $env:TEMP "python-installer.exe"
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
+    Write-Step "Running Python installer silently (1-3 min)..."
+    Start-Process -FilePath $tmp `
+        -ArgumentList "/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","Include_doc=0","Include_launcher=1" `
+        -Wait -NoNewWindow
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+}
+
 function Install-Python {
     if (Get-Command py -ErrorAction SilentlyContinue) {
         Write-Step "Python already installed — skip"
         return
     }
+    $wingetOk = $false
     if (Has-Winget) {
-        Write-Step "Installing Python 3.12 via winget..."
-        winget install -e --id Python.Python.3.12 --silent --accept-source-agreements --accept-package-agreements --scope machine
-    } else {
-        Write-Step "winget not available - downloading Python 3.12 installer directly..."
-        $url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
-        $tmp = Join-Path $env:TEMP "python-installer.exe"
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
-        Write-Step "Running Python installer silently (1-3 min)..."
-        Start-Process -FilePath $tmp `
-            -ArgumentList "/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","Include_doc=0","Include_launcher=1" `
-            -Wait -NoNewWindow
-        Remove-Item $tmp -ErrorAction SilentlyContinue
+        Write-Step "Installing Python 3.12 via winget (winget catalog only, skip msstore)..."
+        $global:LASTEXITCODE = 0
+        try {
+            winget install -e --id Python.Python.3.12 --silent `
+                --accept-source-agreements --accept-package-agreements `
+                --scope machine --source winget
+            if ($LASTEXITCODE -eq 0) { $wingetOk = $true }
+        } catch { $wingetOk = $false }
+        if (-not $wingetOk) {
+            Write-Step "[warn] winget failed (rc=$LASTEXITCODE), falling back to direct download..."
+        }
+    }
+    if (-not $wingetOk) {
+        Install-PythonDirect
     }
     Refresh-Path
     if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
