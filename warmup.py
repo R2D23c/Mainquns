@@ -1633,11 +1633,9 @@ def run() -> int:
     cfg = load_config()
     shots = cfg.getboolean("logging", "screenshots")
     log.info("=" * 60)
-    log.info("Linken Sphere warm-up: старт сценария")
+    log.info("Linken Sphere UI install: старт")
 
     try:
-        file_to_attach = pick_random_file(cfg)
-
         # 0. Запустить Linken Sphere 2, если ещё не запущен
         ensure_linken_sphere_running(cfg)
 
@@ -1648,99 +1646,21 @@ def run() -> int:
 
         # 0.6 Активировать API-порт LS (Settings → Network → Api port).
         #     Одноразово на машине. После — все прогревы через HTTP API,
-        #     UI больше не дёргаем. activate_api_port_if_needed сам
-        #     дисмиссит wizard/firewall если что-то всплыло после логина.
+        #     UI больше не дёргаем.
         activate_api_port_if_needed(cfg)
 
         # 0.7 Сессия машины: уникальное имя CL-XXXXXXXX генерится один раз
         #     и хранится в .session_name. Первый запуск — клонируем шаблон
-        #     xlsx с этим именем + импорт в LS, затем поиск по имени, чтобы
-        #     three_dots был однозначным.
+        #     xlsx с этим именем + импорт в LS через UI.
         session_name = load_session_name()
         import_session_if_needed(cfg, session_name)
-        search_session(cfg, session_name)
-        # подстраховка перед three_dots: закрыть firewall, если всплыл
         _dismiss_firewall_alert()
 
-        # 1. меню "три точки"
-        click("three_dots", cfg)
-        screenshot("01_after_three_dots", shots)
+        log.info("UI install завершён успешно (логин + API-порт + импорт сессии)")
 
-        # 2. пункт Warm up
-        click("warm_up_menu", cfg)
-        screenshot("02_warmup_window", shots)
-
-        # 3. viewing depth (stepper)
-        set_stepper(
-            "viewing_depth_field",
-            cfg.getint("warmup", "viewing_depth"),
-            cfg.getint("warmup", "viewing_depth_min"),
-            cfg,
-        )
-        screenshot("03_viewing_depth_set", shots)
-
-        # 4. time per url (stepper)
-        set_stepper(
-            "time_per_url_field",
-            cfg.getint("warmup", "time_per_url"),
-            cfg.getint("warmup", "time_per_url_min"),
-            cfg,
-        )
-        screenshot("04_time_per_url_set", shots)
-
-        # 5. снять галку — toggle слева в шаблоне, не по центру
-        if cfg.getboolean("warmup", "uncheck_use_most_popular"):
-            click_at_offset(
-                "use_most_popular_checkbox",
-                cfg.getfloat("checkbox_offset", "toggle_x"),
-                cfg.getfloat("checkbox_offset", "toggle_y"),
-                cfg,
-            )
-            screenshot("05_unchecked", shots)
-
-        # 6. Browse file → диалог → ввести путь → Enter
-        click("browse_file_button", cfg)
-        handle_open_file_dialog(file_to_attach, cfg)
-        screenshot("07_after_browse", shots)
-
-        # 6.5. Удалить первые N строк из URL-списка (если задано)
-        remove_n = cfg.getint("warmup", "remove_first_n_lines", fallback=0)
-        if remove_n > 0:
-            remove_first_lines_from_list(remove_n, cfg)
-            screenshot("07b_lines_removed", shots)
-
-        # 7. START
-        click("start_button", cfg)
-        screenshot("08_started", shots)
-
-        # 7.5. После START LS греет URL'ы ~40 минут — Windows может в любой
-        # момент показать firewall alert. Запускаем фоновый watcher-процесс,
-        # который дисмиссит firewall каждые 15с. Ждём примерно столько же,
-        # сколько длится прогрев (100 URL × ~25с = ~42 мин, берём с запасом).
-        warmup_seconds = cfg.getint("warmup", "time_per_url", fallback=7) * 100 * 4
-        log.info("watcher firewall на %dс (длительность прогрева + запас)", warmup_seconds)
-        fw_proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        try:
-            time.sleep(warmup_seconds)
-        finally:
-            fw_proc.terminate()
-            try:
-                fw_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                fw_proc.kill()
-
-        # 8. temp-файл с URL'ами больше не нужен — удаляем
-        try:
-            os.remove(file_to_attach)
-        except OSError as e:
-            log.warning("не получилось удалить %s: %s", file_to_attach, e)
-
-        log.info("сценарий завершён успешно")
-        # Первые N успешных запусков подтверждаем push'ем — чтобы убедиться,
-        # что setup на новой машине отработал. Дальше тишина (только падения).
+        # ✅ install OK — юзер видит что машина готова, можно отключаться от
+        # RDP. Дальше прогрев идёт через HTTP API (warmup_api.py) и не
+        # требует desktop'а / pyautogui / ImageGrab.
         count = _read_success_count()
         if count < SUCCESS_NOTIFY_COUNT:
             count += 1
@@ -1748,13 +1668,46 @@ def run() -> int:
             try:
                 notify_ntfy(
                     _ntfy_header() +
-                    f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}",
+                    f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}\n"
+                    f"Запускаю первый API-прогрев в фоне.\n"
+                    f"RDP можно отключать — дальше всё само.",
                     title="warmup OK",
                     priority="low",
                     tags="white_check_mark",
                 )
             except Exception:
                 pass
+
+        # Сразу запускаем warmup_api.py как DETACHED subprocess. Он:
+        # - не нуждается в desktop'е (HTTP-only, на 127.0.0.1:36555)
+        # - продолжит работу когда warmup.py выйдет
+        # - продолжит работу когда юзер отключит RDP-сессию
+        # Так первый цикл прогрева (~40 мин) пойдёт СРАЗУ, без ожидания
+        # следующего scheduler-trigger'а (через 52 мин).
+        # MultipleInstances=IgnoreNew у scheduled task защитит от overlap,
+        # если TS стрельнёт пока наш фоновый процесс ещё работает.
+        try:
+            log.info("запускаю warmup_api.py в фоне (detached) — RDP можно отключать")
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP → процесс
+                # полностью отвязан от parent'а. Переживёт exit warmup.py
+                # И disconnect RDP-сессии.
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                popen_kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(
+                [sys.executable, str(ROOT / "warmup_api.py")],
+                cwd=str(ROOT),
+                **popen_kwargs,
+            )
+        except Exception as e:
+            log.warning("не получилось запустить warmup_api.py в фоне: %s", e)
+
         return 0
 
     except Exception as exc:
