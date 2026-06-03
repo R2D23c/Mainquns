@@ -656,6 +656,56 @@ def _log_visible_titles() -> None:
 _visible_titles_logged = False
 
 
+def _click_allow_button_via_message(parent_hwnd: int) -> bool:
+    """Найти кнопку 'Allow access' среди дочерних окон Firewall-попапа и
+    кликнуть через SendMessage(BM_CLICK). Это синтезирует клик НЕ через
+    очередь ввода, поэтому не зависит от:
+      • того, какое окно сейчас в фокусе (Alt+A улетал в LS-окно),
+      • раскладки клавиатуры (русская/китайская тоже сработают),
+      • DPI / RDP-скейлинга (без координат вообще).
+    BM_CLICK = 0x00F5 — стандартное сообщение Windows для эмуляции клика
+    по button-control'у. Адресуется конкретному child-hwnd, не глобально."""
+    if sys.platform != "win32":
+        return False
+
+    user32 = ctypes.windll.user32
+    user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+    user32.SendMessageW.restype = ctypes.c_void_p
+    user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+
+    candidates = ("allow access", "разрешить доступ")
+    found = [None]
+
+    ENUM_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _cb(hwnd, _lparam):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        text = (buf.value or "").lower()
+        for c in candidates:
+            if c in text:
+                found[0] = hwnd
+                return False  # stop enum
+        return True
+
+    user32.EnumChildWindows(parent_hwnd, ENUM_PROC(_cb), 0)
+
+    if found[0] is None:
+        return False
+
+    BM_CLICK = 0x00F5
+    user32.SendMessageW(found[0], BM_CLICK, 0, 0)
+    log.info("Firewall: BM_CLICK → Allow button hwnd=%s", found[0])
+    return True
+
+
 def _dismiss_firewall_alert() -> bool:
     """При первом запуске LS Windows может показать Defender Firewall Alert.
     Сначала пытается найти кнопку 'Allow access' по шаблону, иначе ищет окно
@@ -687,6 +737,17 @@ def _dismiss_firewall_alert() -> bool:
     log.info("Firewall Alert hwnd=%d title=%r", hwnd, matched)
     user32 = ctypes.windll.user32
 
+    # 3) BM_CLICK через SendMessage — самый надёжный способ, работает
+    # независимо от фокуса и раскладки. На Win11 24H2/Server 2025 Alt+A
+    # часто улетал в LS-окно (которое перехватывало фокус), а BM_CLICK
+    # адресуется кнопке напрямую и не идёт через input queue.
+    if _click_allow_button_via_message(hwnd):
+        time.sleep(0.6)
+        if not user32.IsWindow(hwnd):
+            log.info("Firewall popup закрыт через BM_CLICK")
+            return True
+        log.warning("BM_CLICK отправлен, но окно ещё живо — fallback на Alt+A")
+
     def _force_foreground(target_hwnd: int) -> bool:
         """Возвращает True если окно ещё живо и попытка поднять отработала.
         Если окно закрылось (например, мы успешно его дисмиссили) — False,
@@ -702,17 +763,10 @@ def _dismiss_firewall_alert() -> bool:
         return False
     time.sleep(0.5)
 
-    # Alt+A — Windows-конвенция: 'A' подчёркнуто в 'Allow access', и
+    # 4) Alt+A — Windows-конвенция: 'A' подчёркнуто в 'Allow access', и
     # клавиша срабатывает на любом разрешении/DPI/языке UI (если только
-    # язык не китайский с другими mnemonic). Это ЕДИНСТВЕННАЯ безопасная
-    # автоматическая попытка:
-    # - Координатный клик отброшен: разные варианты popup'а (Win10 vs Win11,
-    #   проблема Chromium vs LS Client App, RDP scaling) дают разное место
-    #   для 'Allow access'. Промах кликом → активным становится окно ПОД
-    #   промахом → keystroke потом улетает не туда.
-    # - Enter отброшен: на некоторых state'ах default-кнопка = Cancel
-    #   (например если сняли оба network-чекбокса). Enter тогда заблокирует
-    #   приложение в firewall навсегда.
+    # язык не китайский с другими mnemonic). Fallback на случай если
+    # BM_CLICK по какой-то причине не нашёл кнопку.
     log.info("Firewall dismiss: Alt+A")
     pyautogui.hotkey("alt", "a")
     time.sleep(1.0)
