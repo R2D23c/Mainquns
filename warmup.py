@@ -70,9 +70,6 @@ SUCCESS_STATE_FILE = ROOT / ".warmup_state"
 # Сгенерированное имя сессии этой машины (формат CL-XXXXXXXX, 8 цифр).
 # Создаётся один раз — на первой инсталляции — и больше не меняется.
 SESSION_NAME_FILE = ROOT / ".session_name"
-# Дата первого старта машины (пишется один раз). hostname у VPS часто
-# одинаковый (admin/admin), дата помогает их различать в уведомлениях.
-FIRST_START_FILE = ROOT / ".first_start"
 # Флаг, что в LS активирован API-порт (Settings → Network → Api port).
 # Если флаг есть — UI-активацию пропускаем, дальше всё через HTTP.
 API_ACTIVATED_FLAG = ROOT / ".api_activated"
@@ -300,21 +297,34 @@ def _write_success_count(n: int) -> None:
         log.warning("не удалось записать %s: %s", SUCCESS_STATE_FILE, e)
 
 
+# Кэш публичного IP — один HTTP-запрос на Python-процесс, потом в памяти.
+_machine_ip_cache: str | None = None
+
+
 def _machine_id() -> str:
-    """hostname + дата первого старта (формат «Akopto · 2026-06-02 14:23»).
-    Дата фиксируется один раз в .first_start и больше не меняется — это
-    стабильный различитель машин, когда hostname у всех одинаковый."""
-    import socket
-    host = socket.gethostname()
-    try:
-        if FIRST_START_FILE.exists():
-            stamp = FIRST_START_FILE.read_text(encoding="utf-8").strip()
-        else:
-            stamp = time.strftime("%Y-%m-%d %H:%M")
-            FIRST_START_FILE.write_text(stamp, encoding="utf-8")
-    except OSError:
-        stamp = ""
-    return f"{host} · {stamp}" if stamp else host
+    """Публичный IP машины — стабильный уникальный идентификатор VPS.
+    Hostname часто бесполезен (по дефолту 'WIN-XXX' или одинаковый
+    'AKOPTO' у админ-аккаунта). IP уникален у каждой VPS.
+
+    Кэшируется в in-process переменной на всё время жизни Python-процесса.
+    На каждом новом Python-запуске пере-фетчится (provider мог переназначить
+    IP после ребута). ipify основной, checkip.amazonaws.com fallback —
+    оба отдают plain text IP в теле, без заголовков. Если сеть лежит —
+    возвращаем 'no-ip', юзер сразу видит косяк."""
+    global _machine_ip_cache
+    if _machine_ip_cache:
+        return _machine_ip_cache
+    import urllib.request
+    for url in ("https://api.ipify.org", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ip = resp.read().decode("ascii", errors="ignore").strip()
+                if ip:
+                    _machine_ip_cache = ip
+                    return ip
+        except Exception:
+            continue
+    return "no-ip"
 
 
 def _ntfy_header() -> str:

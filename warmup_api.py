@@ -48,7 +48,6 @@ WARMUP_COUNT_FILE = ROOT / ".warmup_count"
 # Дата первого старта этой машины (пишется один раз). Нужна потому, что
 # у разных VPS часто одинаковый hostname (admin/admin) — по дате старта
 # их легко различать в ленте уведомлений.
-FIRST_START_FILE = ROOT / ".first_start"
 # Флаг «done-уведомление уже отправлено». Если scheduler по какой-то
 # причине ещё стреляет (schtasks /disable не сработал), мы НЕ шлём
 # повторные «all jobs done» — просто тихо пытаемся ещё раз отключить
@@ -166,20 +165,33 @@ def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
+# Кэш публичного IP — один HTTP-запрос на Python-процесс, потом в памяти.
+_machine_ip_cache: str | None = None
+
+
 def _machine_id() -> str:
-    """hostname + дата первого старта (формат «Akopto · 2026-06-02 14:23»).
-    Дата фиксируется один раз в .first_start и больше не меняется — это
-    стабильный различитель машин, когда hostname у всех одинаковый."""
-    host = socket.gethostname()
-    try:
-        if FIRST_START_FILE.exists():
-            stamp = FIRST_START_FILE.read_text(encoding="utf-8").strip()
-        else:
-            stamp = time.strftime("%Y-%m-%d %H:%M")
-            FIRST_START_FILE.write_text(stamp, encoding="utf-8")
-    except OSError:
-        stamp = ""
-    return f"{host} · {stamp}" if stamp else host
+    """Публичный IP машины — стабильный уникальный идентификатор VPS.
+    Hostname часто бесполезен (по дефолту 'WIN-XXX' или одинаковый
+    'AKOPTO' у админ-аккаунта). IP уникален у каждой VPS.
+
+    Кэшируется в in-process переменной на всё время жизни Python-процесса.
+    На каждом новом Python-запуске пере-фетчится (provider мог переназначить
+    IP после ребута). ipify основной, checkip.amazonaws.com fallback —
+    оба отдают plain text IP в теле, без заголовков. Если сеть лежит —
+    возвращаем 'no-ip', юзер сразу видит косяк."""
+    global _machine_ip_cache
+    if _machine_ip_cache:
+        return _machine_ip_cache
+    for url in ("https://api.ipify.org", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ip = resp.read().decode("ascii", errors="ignore").strip()
+                if ip:
+                    _machine_ip_cache = ip
+                    return ip
+        except Exception:
+            continue
+    return "no-ip"
 
 
 def _ntfy_header() -> str:
@@ -521,7 +533,6 @@ def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigP
 def run() -> int:
     log.info("=" * 60)
     log.info("Linken Sphere warm-up via API: старт")
-    host = socket.gethostname()
 
     try:
         cfg = load_config()
