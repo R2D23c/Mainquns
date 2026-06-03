@@ -43,6 +43,9 @@ for /f "delims=" %%f in ('dir /b /a-d "%~dp0session_imports\CL-*.xlsx" 2^>nul') 
 if exist "%~dp0screenshots\" (
     rmdir /s /q "%~dp0screenshots\" && echo  - screenshots\
 )
+if exist "%~dp0cookies_export\" (
+    rmdir /s /q "%~dp0cookies_export\" && echo  - cookies_export\
+)
 if exist "%~dp0warmup.log"     ( del /q "%~dp0warmup.log"     && echo  - warmup.log )
 if exist "%~dp0warmup_api.log" ( del /q "%~dp0warmup_api.log" && echo  - warmup_api.log )
 

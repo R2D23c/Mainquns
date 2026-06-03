@@ -38,9 +38,10 @@ for /f "delims=" %%f in ('dir /b /a-d "%~dp0session_imports\CL-*.xlsx" 2^>nul') 
     del /q "%~dp0session_imports\%%f"
 )
 
-if exist "%~dp0screenshots\"   rmdir /s /q "%~dp0screenshots\"
-if exist "%~dp0warmup.log"     del /q "%~dp0warmup.log"
-if exist "%~dp0warmup_api.log" del /q "%~dp0warmup_api.log"
+if exist "%~dp0screenshots\"     rmdir /s /q "%~dp0screenshots\"
+if exist "%~dp0cookies_export\"  rmdir /s /q "%~dp0cookies_export\"
+if exist "%~dp0warmup.log"       del /q "%~dp0warmup.log"
+if exist "%~dp0warmup_api.log"   del /q "%~dp0warmup_api.log"
 
 echo [fresh] re-enabling scheduled task...
 schtasks /change /tn LinkenSphereWarmup /enable >nul 2>&1

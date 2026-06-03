@@ -24,10 +24,8 @@ import configparser
 import json
 import logging
 import random
-import shutil
 import socket
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -59,6 +57,10 @@ WARMUP_STARTED_AT_FILE = ROOT / ".warmup_started_at"
 # повторные «all jobs done» — просто тихо пытаемся ещё раз отключить
 # задачу и выходим. Юзер получает уведомление РОВНО один раз.
 NOTIFIED_DONE_FLAG = ROOT / ".notified_done"
+# Папка, куда LS пишет экспортнутые cookies при достижении target. Не
+# чистится — машины одноразовые (1 цикл прогревов = 1 машина), файлы
+# могут пригодиться оператору (забрать готовый cookie-jar).
+COOKIES_EXPORT_DIR = ROOT / "cookies_export"
 # Имя задачи в Task Scheduler — должно совпадать с тем, что регистрирует
 # schedule_hourly.ps1. После достижения target скрипт сам её disable'нёт.
 TASK_NAME = "LinkenSphereWarmup"
@@ -290,9 +292,11 @@ def count_session_cookies(
     max_retries: int = 3,
 ) -> int | None:
     """Считает cookies в сессии через POST /sessions/export_cookies.
-    Прямого 'count' эндпоинта в LS API нет (см. PDF docs). Экспортируем
-    в свежеподнятую temp-папку, считаем записи во всех созданных файлах,
-    папку грохаем.
+    Прямого 'count' эндпоинта в LS API нет (см. PDF docs).
+
+    Экспорт идёт в постоянную папку COOKIES_EXPORT_DIR (C:\\warmup\\
+    cookies_export\\). Не чистим — машины одноразовые (1 цикл = 1 машина),
+    оператору может пригодиться сам файл cookies.
 
     ВАЖНО про тайминг: LS после завершения warmup ещё ~30-50с дописывает
     последние cookies на диск (тот самый internal save, который иногда
@@ -300,56 +304,63 @@ def count_session_cookies(
     получим неполный файл, либо словим HTTP 409 'Session is used by
     another client or operation' и можем спровоцировать ровно ту
     залипуху, которой боимся. Поэтому:
-      - ждём pre_wait_seconds перед первой попыткой (даём LS долфлашить),
+      - ждём pre_wait_seconds перед первой попыткой (даём LS дофлашить),
       - на 409 — спим 30с и ретраим (без force_stop, чтобы не разрушить
         текущее сохранение).
     Если до max_retries не получилось — отдаём None, в нотификации
     будет 'cookies: ?'. Никаких агрессивных действий не делаем.
 
     Формат файла LS — наблюдался JSON-массив [{...},{...}] с расширением
-    .txt (имя <name>_<date>.txt). Парсим JSON-массив / JSON-словарь /
-    Netscape-text fallback — см. _count_cookies_in_payload."""
+    .txt (имя <session_name>_<DD-MM-YYYY>.txt). Парсим JSON-массив /
+    JSON-словарь / Netscape-text fallback — см. _count_cookies_in_payload."""
     log.info("ждём %dс — LS дофлашит последние cookies перед export...",
              pre_wait_seconds)
     time.sleep(pre_wait_seconds)
 
-    tmp = Path(tempfile.mkdtemp(prefix="ls_cookies_", dir=str(ROOT)))
-    try:
-        for attempt in range(max_retries):
-            try:
-                client.export_cookies(uuid, str(tmp))
-                break
-            except ApiError as e:
-                msg = str(e)
-                is_lock = "HTTP 409" in msg and "Session is used" in msg
-                if is_lock and attempt < max_retries - 1:
-                    log.warning(
-                        "export_cookies: 409 (LS ещё сохраняет?) — sleep 30с, ретрай %d/%d",
-                        attempt + 2, max_retries,
-                    )
-                    time.sleep(30)
-                    continue
-                log.warning("export_cookies упал: %s", e)
-                return None
-        total = 0
-        files = list(tmp.iterdir())
-        if not files:
-            log.warning("export_cookies: папка %s пустая", tmp)
+    COOKIES_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    # Запомним содержимое ДО экспорта, чтобы не пересчитать файлы от
+    # предыдущих неудачных попыток (на случай если функция вызвалась
+    # повторно). Считаем только то, что появится в этот вызов.
+    before = {p.name for p in COOKIES_EXPORT_DIR.iterdir() if p.is_file()}
+
+    for attempt in range(max_retries):
+        try:
+            client.export_cookies(uuid, str(COOKIES_EXPORT_DIR))
+            break
+        except ApiError as e:
+            msg = str(e)
+            is_lock = "HTTP 409" in msg and "Session is used" in msg
+            if is_lock and attempt < max_retries - 1:
+                log.warning(
+                    "export_cookies: 409 (LS ещё сохраняет?) — sleep 30с, ретрай %d/%d",
+                    attempt + 2, max_retries,
+                )
+                time.sleep(30)
+                continue
+            log.warning("export_cookies упал: %s", e)
             return None
-        for f in files:
-            if not f.is_file():
-                continue
-            try:
-                raw = f.read_text(encoding="utf-8", errors="ignore")
-            except OSError as e:
-                log.warning("не прочитал %s: %s", f, e)
-                continue
-            n = _count_cookies_in_payload(raw)
-            log.info("cookies file %s → %d", f.name, n)
-            total += n
-        return total
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+
+    new_files = [
+        p for p in COOKIES_EXPORT_DIR.iterdir()
+        if p.is_file() and p.name not in before
+    ]
+    if not new_files:
+        log.warning("export_cookies: новых файлов в %s не появилось",
+                    COOKIES_EXPORT_DIR)
+        return None
+    total = 0
+    for f in new_files:
+        try:
+            raw = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError as e:
+            log.warning("не прочитал %s: %s", f, e)
+            continue
+        n = _count_cookies_in_payload(raw)
+        log.info("cookies file %s → %d", f.name, n)
+        total += n
+    log.info("cookies экспортнуты в %s (оставлены оператору)",
+             COOKIES_EXPORT_DIR)
+    return total
 
 
 def _count_cookies_in_payload(raw: str) -> int:

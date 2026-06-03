@@ -17,3 +17,5 @@ credentials.ini
 warmup_api.log
 session_imports/CL-*.xlsx
 urls_generated/
+cookies_export/
+.warmup_started_at
