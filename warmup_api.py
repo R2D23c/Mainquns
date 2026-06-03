@@ -283,25 +283,54 @@ def load_started_at() -> int | None:
         return None
 
 
-def count_session_cookies(client: "ApiClient", uuid: str) -> int | None:
+def count_session_cookies(
+    client: "ApiClient",
+    uuid: str,
+    pre_wait_seconds: int = 60,
+    max_retries: int = 3,
+) -> int | None:
     """Считает cookies в сессии через POST /sessions/export_cookies.
     Прямого 'count' эндпоинта в LS API нет (см. PDF docs). Экспортируем
     в свежеподнятую temp-папку, считаем записи во всех созданных файлах,
     папку грохаем.
 
-    Формат файла LS не документирует — встречаются и JSON-массив, и
-    Netscape-текст (TAB-separated, '#'-комменты). Парсим оба:
-      - JSON: len(array)
-      - txt:  кол-во непустых строк, не начинающихся с '#'.
-    Если что-то идёт не по плану — возвращаем None, нотификация
-    покажет 'cookies: ?' но не упадёт."""
+    ВАЖНО про тайминг: LS после завершения warmup ещё ~30-50с дописывает
+    последние cookies на диск (тот самый internal save, который иногда
+    застревает как 'Saving data...'). Если позвать export сразу — либо
+    получим неполный файл, либо словим HTTP 409 'Session is used by
+    another client or operation' и можем спровоцировать ровно ту
+    залипуху, которой боимся. Поэтому:
+      - ждём pre_wait_seconds перед первой попыткой (даём LS долфлашить),
+      - на 409 — спим 30с и ретраим (без force_stop, чтобы не разрушить
+        текущее сохранение).
+    Если до max_retries не получилось — отдаём None, в нотификации
+    будет 'cookies: ?'. Никаких агрессивных действий не делаем.
+
+    Формат файла LS — наблюдался JSON-массив [{...},{...}] с расширением
+    .txt (имя <name>_<date>.txt). Парсим JSON-массив / JSON-словарь /
+    Netscape-text fallback — см. _count_cookies_in_payload."""
+    log.info("ждём %dс — LS дофлашит последние cookies перед export...",
+             pre_wait_seconds)
+    time.sleep(pre_wait_seconds)
+
     tmp = Path(tempfile.mkdtemp(prefix="ls_cookies_", dir=str(ROOT)))
     try:
-        try:
-            client.export_cookies(uuid, str(tmp))
-        except ApiError as e:
-            log.warning("export_cookies упал: %s", e)
-            return None
+        for attempt in range(max_retries):
+            try:
+                client.export_cookies(uuid, str(tmp))
+                break
+            except ApiError as e:
+                msg = str(e)
+                is_lock = "HTTP 409" in msg and "Session is used" in msg
+                if is_lock and attempt < max_retries - 1:
+                    log.warning(
+                        "export_cookies: 409 (LS ещё сохраняет?) — sleep 30с, ретрай %d/%d",
+                        attempt + 2, max_retries,
+                    )
+                    time.sleep(30)
+                    continue
+                log.warning("export_cookies упал: %s", e)
+                return None
         total = 0
         files = list(tmp.iterdir())
         if not files:
