@@ -119,7 +119,13 @@ def screenshot(step: str, enabled: bool) -> None:
     SCREENSHOTS_DIR.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
     path = SCREENSHOTS_DIR / f"{ts}_{step}.png"
-    img = ImageGrab.grab()
+    try:
+        img = ImageGrab.grab()
+    except OSError as e:
+        # screen grab падает в отключённой RDP-сессии — не валим из-за этого
+        # ВЕСЬ скрипт, тем более в except-блоке при логировании ошибки.
+        log.warning("screenshot не сделан (%s) — пропускаю", e)
+        return
     if _CLICK_TRAIL:
         draw = ImageDraw.Draw(img)
         r = 18
@@ -725,9 +731,15 @@ def _dismiss_firewall_alert() -> bool:
     if sys.platform != "win32":
         return False
 
-    # 1) Шаблон allow_access.png — самый надёжный способ, не зависит от локали
-    if _click_allow_access_template():
-        return True
+    # 1) Шаблон allow_access.png — самый надёжный способ, не зависит от локали.
+    # Заворачиваем в try, потому что ImageGrab.grab() падает с 'screen grab
+    # failed' если RDP-сессия отключена. В этом случае проваливаемся на
+    # BM_CLICK (он использует Win32 SendMessage, screen grab не нужен).
+    try:
+        if _click_allow_access_template():
+            return True
+    except OSError as e:
+        log.warning("template-match для firewall упал (%s) — fallback на BM_CLICK", e)
 
     # 2) Заголовок зависит от локали Windows — пробуем все известные варианты
     titles = [
