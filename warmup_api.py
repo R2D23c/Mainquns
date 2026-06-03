@@ -141,7 +141,7 @@ def load_session_name() -> str:
 
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
 # подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
-_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️"}
+_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️", "hourglass_flowing_sand": "⏳"}
 # ntfy JSON-priority — число 1..5. Маппим из наших строковых уровней.
 _PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
 
@@ -929,8 +929,16 @@ def run() -> int:
                 #     (на случай если именно она держит лок зомби-warmup'ом)
                 #     + unlock_blocked_sessions + start_warmup
                 # Только если и nuclear не помог — поднимаем ошибку.
+                # Расширенный 7-step pyramid для multi-VPS контентов: когда
+                # несколько VPS на одном LS-аккаунте, чанк другой машины
+                # держит глобальный API-лок до своего завершения (~2 мин на
+                # один чанк, иногда больше). 30+60-сек ретраи не помогали,
+                # вылетал ⚠️ alert хотя система сама бы поднялась на
+                # следующем scheduler-tick. Теперь добавили 2-мин и 4-мин
+                # ожидания — достаточно чтобы переждать конкурирующий
+                # чанк другой VPS.
                 _last_err: Exception | None = None
-                for attempt in range(5):
+                for attempt in range(7):
                     try:
                         client.start_warmup(uuid, chunk, view_depth, time_per_url)
                         _last_err = None
@@ -939,24 +947,29 @@ def run() -> int:
                         msg = str(e)
                         retriable = "HTTP 409" in msg and "Session is used" in msg
                         _last_err = e
-                        if not retriable or attempt == 4:
+                        if not retriable or attempt == 6:
                             break
-                        if attempt < 2:
-                            wait = 30 * (attempt + 1)  # 30, 60
-                            log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/5",
-                                        i, wait, attempt + 2)
-                            time.sleep(wait)
+                        if attempt == 0:
+                            log.warning("чанк %d: 409 'session in use' — sleep 30с, ретрай 2/7", i)
+                            time.sleep(30)
+                        elif attempt == 1:
+                            log.warning("чанк %d: 409 — sleep 60с, ретрай 3/7", i)
+                            time.sleep(60)
                         elif attempt == 2:
-                            log.warning("чанк %d: 409 после 90с — unlock_blocked_sessions + ретрай 4/5",
-                                        i)
+                            log.warning("чанк %d: 409 после 90с — sleep 2 мин (возможно другой VPS на этом LS-аккаунте), ретрай 4/7", i)
+                            time.sleep(120)
+                        elif attempt == 3:
+                            log.warning("чанк %d: 409 ещё держится — sleep 4 мин, ретрай 5/7", i)
+                            time.sleep(240)
+                        elif attempt == 4:
+                            log.warning("чанк %d: lock не уходит после 7 мин ожидания — unlock_blocked_sessions + ретрай 6/7", i)
                             try:
                                 client.unlock_blocked_sessions()
                                 time.sleep(3)
                             except Exception as unlock_e:
                                 log.warning("unlock_blocked_sessions упал: %s", unlock_e)
-                        else:  # attempt == 3
-                            log.warning("чанк %d: 409 не уходит — force_stop своей сессии + последний ретрай 5/5",
-                                        i)
+                        else:  # attempt == 5
+                            log.warning("чанк %d: nuclear — force_stop своей сессии + последний ретрай 7/7", i)
                             try:
                                 client.force_stop_session(uuid)
                                 time.sleep(5)
@@ -1059,33 +1072,47 @@ def run() -> int:
             except Exception:
                 pass
 
-        # Спец-хинт для самой коварной ошибки — 409 «Session is used by
-        # another client or operation». Чаще всего значит, что в LS висит
-        # зомби-сессия (saving / warmup от прошлого падения) и держит
-        # ГЛОБАЛЬНЫЙ API-лок. Чистится только руками через LS UI.
+        # Категоризация ошибки определяет приоритет пуша:
+        # - 409 'Session is used' (multi-VPS contention / зомби-сессия) →
+        #   priority="low", title="cycle paused — next tick will retry".
+        #   Не пробивает ночной режим телефона. На практике система сама
+        #   поднимается на следующем 45-мин тике в 95% случаев (другая VPS
+        #   к тому моменту освобождает лок).
+        # - всё остальное (signin failed, network error, code crash) →
+        #   priority="high", title="warmup failed". Зовёт человека.
+        is_409 = "HTTP 409" in str(exc) and "Session is used" in str(exc)
+
         hint = ""
-        if "HTTP 409" in str(exc) and "Session is used" in str(exc):
+        if is_409:
             _our_name = locals().get("session_name") or "(см. session: выше)"
             hint = (
-                "\nкакая-то сессия в LS держит глобальный API-лок.\n"
-                "открой Linken Sphere → посмотри, у какой сессии 'Saving data...':\n"
-                f" • если это {_our_name} (наша текущая) → удали её в LS UI (правый клик → Delete)\n"
-                f"   + в cmd от админа: cd /d C:\\warmup && freshstart.bat\n"
-                f"   (прогресс прогрева этой машины сбросится, начнём с новой сессии)\n"
-                " • если это старая CL-* этой машины (после прошлого freshstart) → правый клик → Delete\n"
-                "   (наш текущий прогрев продолжится с того же места)\n"
-                " • если это сессия другой твоей VPS → перезапусти ТУ VPS, эту не трогай\n"
-                "после этого следующий scheduler-trigger подхватит сам.\n"
+                "\nlock на API-аккаунте после 7 ретраев (max ~7 мин ожидания).\n"
+                "обычно это другая твоя VPS на том же LS-аккаунте крутит свой\n"
+                "цикл — следующий scheduler-tick через 45 мин подхватит сам,\n"
+                "ничего делать НЕ надо.\n\n"
+                "если несколько тиков подряд приходит это сообщение —\n"
+                "тогда открой LS UI на этой машине, посмотри:\n"
+                f" • если {_our_name} 'Saving data...' застряло → удали её → freshstart.bat\n"
+                " • если другая CL-* (от старого freshstart) → удали её\n"
+                " • если чужая сессия с другого аккаунта → не трогай\n"
             )
-
-        notify_ntfy(
-            _ntfy_header() +
-            f"error: {exc}\n" + hint + "\n"
-            f"tail:\n{tail}",
-            title="warmup failed (api)",
-            priority="high",
-            tags="warning",
-        )
+            notify_ntfy(
+                _ntfy_header() +
+                f"reason: 409 lock after 7 retries\n" + hint + "\n"
+                f"tail:\n{tail}",
+                title="cycle paused — next tick will retry",
+                priority="low",
+                tags="hourglass_flowing_sand",
+            )
+        else:
+            notify_ntfy(
+                _ntfy_header() +
+                f"error: {exc}\n\n"
+                f"tail:\n{tail}",
+                title="warmup failed (api)",
+                priority="high",
+                tags="warning",
+            )
         return 1
 
 
