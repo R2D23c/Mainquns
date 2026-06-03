@@ -56,7 +56,11 @@ TEMPLATES_DIR = ROOT / "templates"
 SCREENSHOTS_DIR = ROOT / "screenshots"
 LOG_FILE = ROOT / "warmup.log"
 
-pyautogui.FAILSAFE = True  # двинуть мышь в угол — аварийный стоп
+# На задиссконекченной/долго простаивавшей RDP-сессии курсор паркуется
+# в (0,0). При первом же click() pyautogui кидает FailSafeException ещё
+# до того, как мы успеем что-то сделать. Для unattended-автоматизации
+# fail-safe бесполезен — выключаем.
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.15
 
 # Push-уведомления через ntfy.sh: на каждой машине без настройки.
