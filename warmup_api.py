@@ -720,7 +720,12 @@ def run() -> int:
         # ГЛОБАЛЬНЫЙ API-лок. Чистится только руками через LS UI.
         hint = ""
         if "HTTP 409" in str(exc) and "Session is used" in str(exc):
-            hint = "\nзависшая сессия держит LS API. LS UI → удали сессию в 'Saving data...' → перезапусти.\n"
+            _our_name = locals().get("session_name") or "(см. session: выше)"
+            hint = (
+                "\nLS API заблокирован зависшей сессией.\n"
+                f"Открой Linken Sphere → найди сессию со статусом 'Saving data...' (НЕ {_our_name}) → правый клик → Delete.\n"
+                "Следующий scheduler-trigger подхватит сам.\n"
+            )
 
         notify_ntfy(
             _ntfy_header() +
