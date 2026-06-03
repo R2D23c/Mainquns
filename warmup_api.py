@@ -66,7 +66,13 @@ ENDPOINTS = {
     "signin": "/auth/signin",
     "sessions": "/sessions",
     "start_warmup": "/sessions/start_warmup",
-    "stop_warmup": "/sessions/stop_warmup",
+    # Реальные эндпоинты остановки из LS API docs (PDF a83dad2a):
+    # /sessions/stop_warmup не существует — POST туда даёт 405.
+    "stop": "/sessions/stop",                            # мягкий стоп сессии
+    "force_stop": "/sessions/force_stop",                # принудительный
+    # Разблокировка зависших сессий ТОЛЬКО на нашем desktop'е (этой VPS).
+    # Сессии других VPS на том же аккаунте — на их desktop'ах, не задеваются.
+    "unlock_blocked": "/desktops/unlock_stopped_sessions",
 }
 
 
@@ -459,16 +465,30 @@ class ApiClient:
         }
         return self._request("POST", ENDPOINTS["start_warmup"], body)
 
-    def stop_warmup(self, uuid: str) -> dict | list | None:
-        """Останавливает прогрев на КОНКРЕТНОЙ сессии (только uuid из аргумента).
-        Используем в двух местах:
-          1. На выходе при ошибке — освободить свою сессию, чтобы следующий
-             scheduler-trigger не получил 409 от нашего же зомби.
-          2. Перед стартом нового чанка если pre-check показал, что сессия
-             ещё в каком-то нестабильном статусе.
-        Безопасно: трогает СТРОГО переданный uuid. Чужие сессии того же
-        LS-аккаунта (на других VPS) не задеваются."""
-        return self._request("POST", ENDPOINTS["stop_warmup"], {"uuid": uuid})
+    def stop_session(self, uuid: str) -> dict | list | None:
+        """Мягко останавливает сессию (POST /sessions/stop). Принимает СТРОГО
+        наш uuid аргументом — чужие сессии того же LS-аккаунта (на других
+        VPS) не задеваются."""
+        return self._request("POST", ENDPOINTS["stop"], {"uuid": uuid})
+
+    def force_stop_session(self, uuid: str) -> dict | list | None:
+        """Жёстко останавливает сессию (POST /sessions/force_stop). Юзается
+        как fallback, если обычный stop не сработал (сессия залипла в
+        saving / какое-то долгое внутреннее состояние). Тоже строго наш uuid."""
+        return self._request("POST", ENDPOINTS["force_stop"], {"uuid": uuid})
+
+    def unlock_blocked_sessions(self) -> dict | list | None:
+        """Разблокировка сессий на ТЕКУЩЕМ desktop'е (POST /desktops/
+        unlock_stopped_sessions). Из доки: 'Unlock blocked sessions'. Не
+        принимает uuid — оперирует со всем desktop'ом.
+
+        БЕЗОПАСНО ДЛЯ ЧУЖИХ VPS: desktop'ы у каждой VPS свои (хоть LS-аккаунт
+        общий), эта операция трогает только тот desktop, который активен в
+        локальном LS на этой машине. Сессии других VPS — на ИХ desktop'ах.
+
+        Юзаем как recovery при HTTP 409 'Session is used by another client
+        or operation' когда стандартные ретраи не помогают."""
+        return self._request("POST", ENDPOINTS["unlock_blocked"], {})
 
     def get_session_state(self, uuid: str) -> dict | None:
         """Состояние конкретной сессии. Сначала пробуем GET /sessions/{uuid},
@@ -628,10 +648,16 @@ def run() -> int:
                 # operation». Ловится либо когда LS внутри ещё не успела
                 # перейти в stopped/imported после предыдущего чанка, либо
                 # когда зомби-сессия с прошлого падения держит глобальный
-                # API-лок. 3 попытки с расширенными ретраями: 30с / 60с
-                # (всего ~1.5 мин запаса).
+                # API-лок.
+                # Стратегия:
+                #   попытка 1 → сразу start_warmup
+                #   попытка 2 → sleep 30с, start_warmup
+                #   попытка 3 → sleep 60с, start_warmup
+                #   попытка 4 (recovery) → unlock_blocked_sessions (LS API
+                #     эндпоинт для этой ровно ситуации) + start_warmup сразу
+                # Только если и unlock не помог — поднимаем ошибку наверх.
                 _last_err: Exception | None = None
-                for attempt in range(3):
+                for attempt in range(4):
                     try:
                         client.start_warmup(uuid, chunk, view_depth, time_per_url)
                         _last_err = None
@@ -640,12 +666,24 @@ def run() -> int:
                         msg = str(e)
                         retriable = "HTTP 409" in msg and "Session is used" in msg
                         _last_err = e
-                        if not retriable or attempt == 2:
+                        if not retriable or attempt == 3:
                             break
-                        wait = 30 * (attempt + 1)  # 30, 60
-                        log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/3",
-                                    i, wait, attempt + 2)
-                        time.sleep(wait)
+                        if attempt < 2:
+                            wait = 30 * (attempt + 1)  # 30, 60
+                            log.warning("чанк %d: 409 'session in use' — sleep %dс, ретрай %d/4",
+                                        i, wait, attempt + 2)
+                            time.sleep(wait)
+                        else:
+                            # Recovery: разблокируем зависшие сессии на нашем
+                            # desktop'е. Только наш desktop (этой VPS), не
+                            # чужие.
+                            log.warning("чанк %d: ретраи исчерпаны → unlock_blocked_sessions + последняя попытка",
+                                        i)
+                            try:
+                                client.unlock_blocked_sessions()
+                                time.sleep(3)
+                            except Exception as unlock_e:
+                                log.warning("unlock_blocked_sessions упал: %s", unlock_e)
                 if _last_err is not None:
                     raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {_last_err}") from _last_err
                 ok = wait_for_warmup_done(client, uuid, cfg)
@@ -707,15 +745,20 @@ def run() -> int:
         log.exception("сценарий упал: %s", exc)
         # Перед выходом ПЫТАЕМСЯ освободить НАШУ сессию, чтобы следующий
         # scheduler-trigger не получил 409 от нашего же зомби. Строго наш
-        # uuid из локалов, чужие сессии аккаунта не трогаем. Если uuid
-        # ещё не определён (упало на signin/lookup) — пропускаем тихо.
+        # uuid из локалов, чужие сессии аккаунта не трогаем. Сначала мягкий
+        # stop, на 4xx/5xx — force_stop. Если uuid ещё не определён (упало
+        # на signin/lookup) — пропускаем тихо.
         try:
             _our_uuid = locals().get("uuid")
             if _our_uuid and "client" in locals():
-                log.info("освобождаю свою сессию: stop_warmup(%s)", _our_uuid)
-                client.stop_warmup(_our_uuid)  # type: ignore[name-defined]
+                log.info("освобождаю свою сессию: stop(%s)", _our_uuid)
+                try:
+                    client.stop_session(_our_uuid)  # type: ignore[name-defined]
+                except ApiError as _e:
+                    log.warning("stop вернул %s → пробую force_stop", _e)
+                    client.force_stop_session(_our_uuid)  # type: ignore[name-defined]
         except Exception as e:
-            log.warning("stop_warmup на выходе не сработал: %s", e)
+            log.warning("освобождение своей сессии не сработало: %s", e)
 
         tail = ""
         if LOG_FILE.exists():
