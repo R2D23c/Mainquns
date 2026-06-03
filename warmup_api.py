@@ -905,6 +905,23 @@ def run() -> int:
             [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # Анти-collision jitter: на крупных парках (5+ VPS на одном
+        # LS-аккаунте) машины часто синхронизируются по времени —
+        # одновременно завершают unattended install, затем каждые 45 мин
+        # одновременно тикает scheduler. Без jitter все делают первый
+        # start_warmup одновременно → один проходит, остальные ловят 409.
+        # Случайная пауза 0-120 сек ПЕРЕД первым чанком размывает старты
+        # по 2-мин окну. Каждый цикл получает свой случайный сдвиг —
+        # синхронизация не накапливается даже если все машины стартанули
+        # одной командой unattended-режима. Цикл удлиняется в среднем на
+        # 60 сек (37 → 38 мин), всё ещё в 45-мин scheduler-интервале.
+        # Совместно с 7-step retry pyramid держит систему молчаливой
+        # для 10+ машин на одном аккаунте.
+        jitter = random.randint(0, 120)
+        if jitter:
+            log.info("анти-collision jitter: sleep %dс перед первым start_warmup", jitter)
+            time.sleep(jitter)
+
         t_start = time.time()
         chunks_done = 0
         try:
