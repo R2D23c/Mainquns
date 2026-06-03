@@ -180,6 +180,117 @@ def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
         log.warning("notify_ntfy failed: %s", e)
 
 
+# --- Console banners for the detached warmup_api.py window ------------------
+# Когда warmup.py спавнит warmup_api.py с DETACHED_PROCESS + stdout=DEVNULL,
+# Windows всё равно открывает консольное окно (особенность python.exe console
+# subsystem). Раньше оно зияло пустотой и пугало юзера. Теперь — пишем туда
+# статичный информационный баннер через CONOUT$ (специальный Windows-файл,
+# напрямую = текущая консоль). sys.stdout не трогаем, чтобы не сломать логи
+# через redirection в cycle 2+ (Task Scheduler).
+
+def _to_console(msg: str) -> None:
+    """Write a line directly to the attached console window.
+    Bypasses sys.stdout (which is DEVNULL when spawned detached). Silent
+    no-op if no console — works in any spawn mode."""
+    if sys.platform != "win32":
+        print(msg, flush=True)
+        return
+    try:
+        with open("CONOUT$", "w", encoding="utf-8") as con:
+            con.write(msg + "\n")
+    except OSError:
+        pass
+
+
+def _print_running_banner(session_name: str, machine_id: str) -> None:
+    bar = "=" * 62
+    for line in (
+        "",
+        bar,
+        "",
+        "   #####  WARMUP IS RUNNING  #####",
+        "",
+        bar,
+        "",
+        f"      session   :  {session_name}",
+        f"      machine   :  {machine_id}",
+        "",
+        bar,
+        "",
+        "",
+        "      *********************************************",
+        "      *                                           *",
+        "      *      RDP CAN BE DISCONNECTED NOW          *",
+        "      *      Warmup continues in background       *",
+        "      *                                           *",
+        "      *********************************************",
+        "",
+        "",
+        "  Telegram push will arrive when warmup is complete (~3-4h).",
+        "",
+        bar,
+        "",
+    ):
+        _to_console(line)
+
+
+def _print_complete_banner(
+    session_name: str,
+    machine_id: str,
+    total_time_en: str,
+    urls_done: int,
+    target: int,
+    cookies_str: str,
+) -> None:
+    bar = "=" * 62
+    for line in (
+        "",
+        bar,
+        "",
+        "   #####  WARMUP COMPLETE  #####",
+        "",
+        bar,
+        "",
+        f"      session     :  {session_name}",
+        f"      machine     :  {machine_id}",
+        f"      total time  :  {total_time_en}",
+        f"      URLs        :  {urls_done}/{target}",
+        f"      cookies     :  {cookies_str}",
+        "",
+        bar,
+        "",
+        "",
+        "      *********************************************",
+        "      *                                           *",
+        "      *      ALL DONE -- YOU CAN CLOSE             *",
+        "      *      ALL WINDOWS NOW                       *",
+        "      *                                           *",
+        "      *********************************************",
+        "",
+        "",
+        f"  Cookies saved at: {COOKIES_EXPORT_DIR}",
+        "  See Telegram for full report.",
+        "",
+        bar,
+        "",
+    ):
+        _to_console(line)
+
+
+def _fmt_total_elapsed_en(started_at: int | None) -> str:
+    if started_at is None:
+        return "n/a"
+    secs = max(0, int(time.time() - started_at))
+    h, rem = divmod(secs, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}min"
+    return f"{m} min"
+
+
+# ---------------------------------------------------------------------------
+
+
 # Кэш публичного IP — один HTTP-запрос на Python-процесс, потом в памяти.
 _machine_ip_cache: str | None = None
 
@@ -703,6 +814,10 @@ def run() -> int:
         email = creds.get("account", "email").strip()
         password = creds.get("account", "password")
 
+        # Сразу при старте пишем большой видимый баннер в окно консоли,
+        # чтобы оператор знал что процесс жив и RDP можно отключать.
+        _print_running_banner(session_name, _machine_id())
+
         # One-shot гейт: уже прогрели целевой объём? — JOB DONE, на выход.
         # Уведомление шлём РОВНО один раз (флаг .notified_done). Если scheduler
         # всё ещё стреляет (significa disable не сработал на прошлом запуске)
@@ -713,6 +828,11 @@ def run() -> int:
             if already_notified_done():
                 log.info("ALL JOBS DONE: %d/%d, уже уведомлял — тихий ретрай disable", current, target)
                 disable_scheduled_task()
+                _print_complete_banner(
+                    session_name, _machine_id(),
+                    _fmt_total_elapsed_en(load_started_at()),
+                    current, target, "see telegram",
+                )
                 return 0
             log.info("ALL JOBS DONE: %d/%d URL прогрето — disable + notify", current, target)
             disabled = disable_scheduled_task()
@@ -728,6 +848,11 @@ def run() -> int:
                 tags="tada",
             )
             mark_notified_done()
+            _print_complete_banner(
+                session_name, _machine_id(),
+                _fmt_total_elapsed_en(load_started_at()),
+                current, target, "see telegram",
+            )
             return 0
         log.info("прогресс: %d/%d URL (осталось ~%d)", current, target, max(0, target - current))
 
@@ -889,6 +1014,12 @@ def run() -> int:
                 tags="tada",
             )
             mark_notified_done()
+            # Финальный баннер в консоль — заменяет «RUNNING» в окне.
+            _print_complete_banner(
+                session_name, _machine_id(),
+                _fmt_total_elapsed_en(load_started_at()),
+                new_total, target, cookies_str,
+            )
         else:
             notify_ntfy(
                 _ntfy_header() +
