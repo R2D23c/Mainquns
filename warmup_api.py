@@ -24,8 +24,10 @@ import configparser
 import json
 import logging
 import random
+import shutil
 import socket
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -77,6 +79,7 @@ ENDPOINTS = {
     # Разблокировка зависших сессий ТОЛЬКО на нашем desktop'е (этой VPS).
     # Сессии других VPS на том же аккаунте — на их desktop'ах, не задеваются.
     "unlock_blocked": "/desktops/unlock_stopped_sessions",
+    "export_cookies": "/sessions/export_cookies",
 }
 
 
@@ -278,6 +281,70 @@ def load_started_at() -> int | None:
         return int(WARMUP_STARTED_AT_FILE.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return None
+
+
+def count_session_cookies(client: "ApiClient", uuid: str) -> int | None:
+    """Считает cookies в сессии через POST /sessions/export_cookies.
+    Прямого 'count' эндпоинта в LS API нет (см. PDF docs). Экспортируем
+    в свежеподнятую temp-папку, считаем записи во всех созданных файлах,
+    папку грохаем.
+
+    Формат файла LS не документирует — встречаются и JSON-массив, и
+    Netscape-текст (TAB-separated, '#'-комменты). Парсим оба:
+      - JSON: len(array)
+      - txt:  кол-во непустых строк, не начинающихся с '#'.
+    Если что-то идёт не по плану — возвращаем None, нотификация
+    покажет 'cookies: ?' но не упадёт."""
+    tmp = Path(tempfile.mkdtemp(prefix="ls_cookies_", dir=str(ROOT)))
+    try:
+        try:
+            client.export_cookies(uuid, str(tmp))
+        except ApiError as e:
+            log.warning("export_cookies упал: %s", e)
+            return None
+        total = 0
+        files = list(tmp.iterdir())
+        if not files:
+            log.warning("export_cookies: папка %s пустая", tmp)
+            return None
+        for f in files:
+            if not f.is_file():
+                continue
+            try:
+                raw = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError as e:
+                log.warning("не прочитал %s: %s", f, e)
+                continue
+            n = _count_cookies_in_payload(raw)
+            log.info("cookies file %s → %d", f.name, n)
+            total += n
+        return total
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _count_cookies_in_payload(raw: str) -> int:
+    raw = raw.strip()
+    if not raw:
+        return 0
+    if raw[0] in "[{":
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict):
+            # Может быть {"cookies": [...]} или {"<host>": [...]}.
+            for v in data.values():
+                if isinstance(v, list):
+                    return len(v)
+            return 1
+    # Netscape-формат либо одна-куки-на-строку.
+    return sum(
+        1 for line in raw.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
 
 
 def _fmt_total_elapsed(started_at: int | None) -> str:
@@ -501,6 +568,16 @@ class ApiClient:
         как fallback, если обычный stop не сработал (сессия залипла в
         saving / какое-то долгое внутреннее состояние). Тоже строго наш uuid."""
         return self._request("POST", ENDPOINTS["force_stop"], {"uuid": uuid})
+
+    def export_cookies(self, uuid: str, folder_path: str) -> dict | list | None:
+        """Экспортирует cookies сессии в файл внутри folder_path (POST
+        /sessions/export_cookies). В доке поле называется uuids — массив
+        uuid'ов, в нашем случае всегда один (наш). LS сам выбирает имя
+        файла (наблюдалось <uuid>.json/.txt)."""
+        return self._request(
+            "POST", ENDPOINTS["export_cookies"],
+            {"uuids": [uuid], "folder_path": folder_path},
+        )
 
     def unlock_blocked_sessions(self) -> dict | list | None:
         """Разблокировка сессий на ТЕКУЩЕМ desktop'е (POST /desktops/
@@ -755,6 +832,8 @@ def run() -> int:
         if target_reached:
             disabled = disable_scheduled_task()
             total_elapsed = _fmt_total_elapsed(load_started_at())
+            cookies_n = count_session_cookies(client, uuid)
+            cookies_str = f"{cookies_n}" if cookies_n is not None else "?"
             tail = ("scheduled task disabled. All jobs done."
                     if disabled else
                     "could NOT disable schedule — run manually:\n"
@@ -763,7 +842,8 @@ def run() -> int:
                 _ntfy_header() +
                 f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
                 f"total: {new_total}/{target} URL — target reached 🎉\n"
-                f"total time: {total_elapsed}\n" + tail,
+                f"total time: {total_elapsed}\n"
+                f"cookies: {cookies_str}\n" + tail,
                 title="warmup all done",
                 priority="low",
                 tags="tada",
