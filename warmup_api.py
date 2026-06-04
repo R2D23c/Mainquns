@@ -21,6 +21,7 @@ Linken Sphere 2 — прогрев через локальный HTTP-API (по�
 from __future__ import annotations
 
 import configparser
+import ctypes
 import json
 import logging
 import random
@@ -182,23 +183,63 @@ def notify_ntfy(message: str, *, title: str, priority: str, tags: str) -> None:
 
 # --- Console banners for the detached warmup_api.py window ------------------
 # Когда warmup.py спавнит warmup_api.py с DETACHED_PROCESS + stdout=DEVNULL,
-# Windows всё равно открывает консольное окно (особенность python.exe console
-# subsystem). Раньше оно зияло пустотой и пугало юзера. Теперь — пишем туда
-# статичный информационный баннер через CONOUT$ (специальный Windows-файл,
-# напрямую = текущая консоль). sys.stdout не трогаем, чтобы не сломать логи
-# через redirection в cycle 2+ (Task Scheduler).
+# Windows ИНОГДА открывает консольное окно автоматически (это видно как
+# чёрный квадрат с заголовком python.exe), а иногда — нет. Поведение
+# капризное, зависит от версии Windows Server и timing'а. Раньше окно
+# зияло пустотой даже когда открывалось.
+#
+# Теперь:
+#   1. _ensure_console() — явный AllocConsole если консоли нет вообще.
+#      На уже-аллоцированной (cycle 2+ через Task Scheduler cmd) — no-op.
+#   2. _to_console() — пишет в CONOUT$ напрямую через Win32 CreateFileW
+#      + WriteConsoleW, минуя Python's open() который иногда подвисал
+#      из-за DEVNULL-state у sys.stdout.
+#
+# sys.stdout не трогаем — redirection в run_api.log для cycle 2+
+# (Task Scheduler) сохраняется.
+
+def _ensure_console() -> None:
+    """Гарантирует наличие attached console на Windows.
+    При DETACHED_PROCESS Windows может не создать консоль автоматически —
+    AllocConsole форсит создание. No-op если консоль уже есть (cycle 2+
+    через cmd.exe). Silent ignore любых ошибок."""
+    if sys.platform != "win32":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.GetConsoleWindow():
+            kernel32.AllocConsole()
+    except Exception:
+        pass
+
 
 def _to_console(msg: str) -> None:
-    """Write a line directly to the attached console window.
-    Bypasses sys.stdout (which is DEVNULL when spawned detached). Silent
-    no-op if no console — works in any spawn mode."""
+    """Write a line directly to the attached console via Win32 CreateFileW.
+    Bypasses Python's open() to avoid quirks with DEVNULL-state stdout.
+    Silent no-op if no console attached."""
     if sys.platform != "win32":
         print(msg, flush=True)
         return
     try:
-        with open("CONOUT$", "w", encoding="utf-8") as con:
-            con.write(msg + "\n")
-    except OSError:
+        kernel32 = ctypes.windll.kernel32
+        GENERIC_WRITE = 0x40000000
+        FILE_SHARE_WRITE = 0x00000002
+        OPEN_EXISTING = 3
+        INVALID_HANDLE = -1
+        h = kernel32.CreateFileW(
+            "CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE,
+            None, OPEN_EXISTING, 0, None,
+        )
+        if h == INVALID_HANDLE or h == 0:
+            return
+        try:
+            data = (msg + "\r\n").encode("utf-16-le")
+            n = ctypes.c_ulong(0)
+            # WriteConsoleW expects count in chars, not bytes
+            kernel32.WriteConsoleW(h, data, len(msg) + 2, ctypes.byref(n), None)
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
         pass
 
 
@@ -806,6 +847,12 @@ def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigP
 def run() -> int:
     log.info("=" * 60)
     log.info("Linken Sphere warm-up via API: старт")
+
+    # Гарантируем что консольное окно attached. При DETACHED_PROCESS
+    # Windows капризничает — иногда создаёт console window сам, иногда
+    # нет. AllocConsole форсит создание если ещё нет. На уже-аллоцированной
+    # консоли (cycle 2+ через Task Scheduler cmd) — no-op.
+    _ensure_console()
 
     try:
         cfg = load_config()
