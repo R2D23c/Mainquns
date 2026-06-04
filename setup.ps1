@@ -43,7 +43,7 @@ function Install-GitDirect {
 
 function Install-Git {
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        Write-Step "Git already installed — skip"
+        Write-Step "Git already installed -- skip"
         return
     }
     $wingetOk = $false
@@ -87,7 +87,7 @@ function Install-PythonDirect {
 
 function Install-Python {
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        Write-Step "Python already installed — skip"
+        Write-Step "Python already installed -- skip"
         return
     }
     $wingetOk = $false
@@ -131,7 +131,7 @@ $preloadEmail = $env:LS_EMAIL
 $preloadPassword = $env:LS_PASSWORD
 $unattended = $false
 if ($preloadEmail -and $preloadPassword) {
-    Write-Step "Unattended mode: LS_EMAIL/LS_PASSWORD detected — Notepad will be skipped"
+    Write-Step "Unattended mode: LS_EMAIL/LS_PASSWORD detected -- Notepad will be skipped"
     $unattended = $true
     $env:WARMUP_UNATTENDED = "1"
 }
