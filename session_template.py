@@ -14,10 +14,11 @@ stateless функция, читает шаблон → рандомит fingerp
 
 Что рандомится per-machine:
     System version: 10 / 11
-    CPU:            4 / 6 / 8
-    RAM:            8 / 16
-    Screen:         1920x1080 / 2560x1440
-    Video adapter:  9 реалистичных позиций Intel / NVIDIA / AMD
+    Video adapter:  8 позиций строго из каталога LS для Windows
+                    (Intel iGPU, Nvidia GTX/RTX, AMD RX 6600)
+    CPU / RAM / Screen: выбираются ИЗ ПРОФИЛЯ выбранной видеокарты
+                       (см. ADAPTER_PROFILES). Так исключены абсурдные
+                       сборки типа RTX 4070 + 4 ядра + 8 GB + 1080p.
 
 Колонки строки 3 в шаблоне:
     A=session_name  B=description     C=connection      D=ip
@@ -54,26 +55,35 @@ FIXED = {
     "Y": "",                 # import passwords пусто
 }
 
-# --- буферы для random.choice ---
 SYS_VERSIONS = [10, 11]
-CPUS = [4, 6, 8]
-RAMS = [8, 16]
-SCREENS = ["1920x1080", "2560x1440"]
-# строго из официального каталога LS (см. лист "Инструкция RU" в _template.xlsx)
-VIDEO_ADAPTERS = [
-    # Intel (~44%)
-    "Intel, UHD Graphics 770",
-    "Intel, UHD Graphics 630",
-    "Intel, Iris(R) Xe Graphics",
-    "Intel, UHD Graphics",
-    # Nvidia (~33%) — регистр строго "Nvidia", не "NVIDIA"
-    "Nvidia, GeForce RTX 3060",
-    "Nvidia, GeForce RTX 4070",
-    "Nvidia, GeForce GTX 1660",
-    # AMD (~22%)
-    "AMD, Radeon RX 6600",
-    "AMD, Radeon(TM) Vega 8 Graphics",
-]
+
+# Профили sano-комбинаций: для каждой видеокарты — допустимые CPU/RAM/Screen.
+# Названия строго из официального каталога LS (см. лист "Инструкция RU"
+# в _template.xlsx). Профили построены чтобы исключить абсурдные сборки
+# (например, RTX 4070 с 4 ядрами или 8 GB RAM, GTX 1660 с i3 и т.д.).
+ADAPTER_PROFILES: dict[str, tuple[list[int], list[int], list[str]]] = {
+    # --- Intel iGPU: офисные машины и лёгкие ноуты, любые комбинации валидны ---
+    "Intel, UHD Graphics 770":     ([4, 6, 8], [8, 16], ["1920x1080", "2560x1440"]),
+    "Intel, UHD Graphics 630":     ([4, 6, 8], [8, 16], ["1920x1080", "2560x1440"]),
+    "Intel, Iris(R) Xe Graphics":  ([4, 6, 8], [8, 16], ["1920x1080", "2560x1440"]),
+    "Intel, UHD Graphics":         ([4, 6, 8], [8, 16], ["1920x1080", "2560x1440"]),
+
+    # --- старый бюджетный геймер 2019-2021 ---
+    # GTX 1660 + i3/Ryzen 3 (4 ядра) бывает крайне редко → только 6/8
+    # 8 GB RAM в эту эпоху ещё валидно для бюджета
+    "Nvidia, GeForce GTX 1660":    ([6, 8],    [8, 16], ["1920x1080", "2560x1440"]),
+
+    # --- современный мидл 2021+ ---
+    # RTX 3060 / RX 6600: только 6-8 ядер, только 16 GB
+    # (8 GB с современной картой = редкость уровня сборщик-некрофил)
+    "Nvidia, GeForce RTX 3060":    ([6, 8],    [16],    ["1920x1080", "2560x1440"]),
+    "AMD, Radeon RX 6600":         ([6, 8],    [16],    ["1920x1080", "2560x1440"]),
+
+    # --- high-end 2023+ ---
+    # RTX 4070 ставят только в собранные системы с i7/Ryzen 7+ (8 ядер)
+    # и монитор 1080p с такой картой — позорный мисматч, только 2K
+    "Nvidia, GeForce RTX 4070":    ([8],       [16],    ["2560x1440"]),
+}
 
 
 def build_session_xlsx(
@@ -109,11 +119,17 @@ def build_session_xlsx(
     for cell, val in FIXED.items():
         ws[f"{cell}3"] = val
 
-    ws["M3"] = rng.choice(CPUS)
-    ws["N3"] = rng.choice(RAMS)
-    ws["O3"] = rng.choice(SCREENS)
+    # Сначала выбираем видеокарту — она определяет реалистичный набор
+    # CPU / RAM / Screen из своего профиля. Это исключает абсурдные
+    # сочетания (RTX 4070 с 4 ядрами и т.п.).
+    adapter = rng.choice(list(ADAPTER_PROFILES.keys()))
+    cpu_options, ram_options, screen_options = ADAPTER_PROFILES[adapter]
+
+    ws["M3"] = rng.choice(cpu_options)
+    ws["N3"] = rng.choice(ram_options)
+    ws["O3"] = rng.choice(screen_options)
     ws["P3"] = rng.choice(SYS_VERSIONS)
-    ws["Q3"] = rng.choice(VIDEO_ADAPTERS)
+    ws["Q3"] = adapter
 
     target.parent.mkdir(parents=True, exist_ok=True)
     wb.save(target)
