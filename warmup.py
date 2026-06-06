@@ -981,16 +981,10 @@ def _press_enter_on_wizard() -> bool:
         pyautogui.press("enter")
         log.info("wizard: PNG не нашёл, отправил Enter в 'Customize your experience'")
         time.sleep(1.5)
-        # Если окно 'Customize your experience' БОЛЬШЕ НЕ открыто — Enter
-        # дожал последнюю кнопку и wizard закрылся → пишем флаг.
-        if not _find_window_by_title_substring("Customize your experience"):
-            try:
-                WIZARD_DISMISSED_FLAG.touch()
-                log.info("wizard: Enter закрыл wizard, пишу флаг %s",
-                         WIZARD_DISMISSED_FLAG.name)
-            except Exception as e:
-                log.warning("не смог записать %s: %s",
-                            WIZARD_DISMISSED_FLAG.name, e)
+        # Флаг WIZARD_DISMISSED_FLAG здесь НЕ пишем: Enter закрывает только
+        # первый Customize-wizard, но впереди ещё post-login welcome
+        # ('Welcome to Linken Sphere 2'), который кликается через get_started2.
+        # Флаг ставится ТОЛЬКО там — иначе welcome не успеет закликаться.
         return True
     except Exception as e:
         log.warning("wizard: Enter fallback failed: %s", e)
@@ -1067,14 +1061,17 @@ def _dismiss_customize_wizard_step() -> bool:
             pyautogui.click(pt[0], pt[1])
             if tpl_name == "skip":
                 _skip_clicked_at = time.time()
-            # get_started / get_started2 = финальная кнопка wizard'а.
-            # После её клика wizard закрылся → пишем флаг, чтобы при следующих
-            # запусках вообще не сканировать PNG (исключаем false-positive
-            # на login-форме и экономим CPU).
-            if tpl_name in ("get_started", "get_started2"):
+            # get_started2 = ПОСЛЕДНИЙ экран welcome ПОСЛЕ ЛОГИНА
+            # ('Welcome to Linken Sphere 2' → GET STARTED). После него LS
+            # переходит на главный дашборд. Только сейчас можно безопасно
+            # отключать wizard-handler — раньше нельзя, иначе welcome не
+            # кликнется. get_started БЕЗ цифры — это финал первого wizard'а
+            # 'Customize your experience' (ДО логина), после него ещё есть
+            # welcome → флаг ставить рано.
+            if tpl_name == "get_started2":
                 try:
                     WIZARD_DISMISSED_FLAG.touch()
-                    log.info("wizard: финальная кнопка нажата, пишу флаг %s",
+                    log.info("wizard: welcome пройден, пишу флаг %s",
                              WIZARD_DISMISSED_FLAG.name)
                 except Exception as e:
                     log.warning("не смог записать %s: %s",
