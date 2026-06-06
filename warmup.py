@@ -963,6 +963,15 @@ def _find_ls_window() -> int:
 # самой LS на повторных запусках, когда попапа со скипом уже нет.
 _skip_clicked_at: float = 0.0
 _CLOSE_X_GRACE_AFTER_SKIP = 30.0
+# Стейт-переключатель фазы. False = до логина (логин-форма ещё показана,
+# SIGN UP link может false-positively сматчиться с skip.png). True = после
+# успешного Enter в login_if_needed (логин-формы больше нет, видны
+# welcome / tour / dashboard — там SIGN UP отсутствует, безопасно
+# использовать пониженный SKIP threshold чтобы поймать product-tour SKIP).
+# Юзер подтвердил: login ВСЕГДА показывается при каждом запуске LS,
+# поэтому переменная гарантированно переключится в True в каждом процессе
+# warmup.py после Enter.
+_login_submitted_this_run: bool = False
 
 
 def _press_enter_on_wizard() -> bool:
@@ -1023,19 +1032,22 @@ def _dismiss_customize_wizard_step() -> bool:
     lower_half_top = rect.top + h // 2
 
     # (имя шаблона, top границы поиска, confidence)
+    # SKIP threshold адаптивный по фазе:
+    #   - ДО логина (форма Authentication ещё на экране): 0.85 — защита от
+    #     false-positive на SIGN UP link под SIGN IN. Этот link визуально
+    #     матчит skip.png при ~0.699; если бы порог был ниже, мы бы кликали
+    #     на SIGN UP, закрывали auth-окно (LS открывает регистрацию),
+    #     получали rect 0×0 и проваливали login.
+    #   - ПОСЛЕ логина (Enter уже нажат, _login_submitted_this_run=True):
+    #     0.65 — реальный matchпродуктового тура LS v2.17.2 ~0.699,
+    #     SIGN UP больше не виден (login-форма ушла), false-positive
+    #     невозможен.
+    skip_threshold = 0.65 if _login_submitted_this_run else 0.85
     candidates = [
         ("next_step",    lower_half_top, 0.80),
         ("get_started",  lower_half_top, 0.80),
         ("get_started2", lower_half_top, 0.80),
-        # skip: вернул 0.85. Пробовал понизить до 0.65 (для tour'а в
-        # LS v2.17.2), но получили false-positive на login-форме:
-        # маленький SIGN UP link визуально матчит skip.png и кликается,
-        # что закрывает auth-окно (LS открывает регистрацию). После
-        # этого rect становится 0×0 и login_if_needed отваливается.
-        # Product tour на свежем LS придётся проходить руками один раз —
-        # после welcome get_started2 пишется флаг .wizard_dismissed,
-        # и dismiss-handler отключается на всех последующих запусках.
-        ("skip",         rect.top,       0.85),
+        ("skip",         rect.top,       skip_threshold),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
@@ -1069,17 +1081,18 @@ def _dismiss_customize_wizard_step() -> bool:
             pyautogui.click(pt[0], pt[1])
             if tpl_name == "skip":
                 _skip_clicked_at = time.time()
-            # get_started2 = ПОСЛЕДНИЙ экран welcome ПОСЛЕ ЛОГИНА
-            # ('Welcome to Linken Sphere 2' → GET STARTED). После него LS
-            # переходит на главный дашборд. Только сейчас можно безопасно
-            # отключать wizard-handler — раньше нельзя, иначе welcome не
-            # кликнется. get_started БЕЗ цифры — это финал первого wizard'а
-            # 'Customize your experience' (ДО логина), после него ещё есть
-            # welcome → флаг ставить рано.
-            if tpl_name == "get_started2":
+            # close_x = ФИНАЛЬНЫЙ экран в пост-логин последовательности
+            # (welcome → tour SKIP → close_x → дашборд). Только после
+            # close_x все wizard-экраны точно пройдены, можно отключить
+            # dismiss-handler навсегда на этой машине.
+            # Раньше флаг ставился на get_started2 (welcome) — это была
+            # ошибка: tour и close_x ещё впереди, а handler уже выключался,
+            # и SKIP в туре никогда не пытался кликнуться → three_dots
+            # не появлялись → timeout 120с.
+            if tpl_name == "close_x":
                 try:
                     WIZARD_DISMISSED_FLAG.touch()
-                    log.info("wizard: welcome пройден, пишу флаг %s",
+                    log.info("wizard: close_x пройден (финал), пишу флаг %s",
                              WIZARD_DISMISSED_FLAG.name)
                 except Exception as e:
                     log.warning("не смог записать %s: %s",
@@ -1227,6 +1240,13 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     pyautogui.press("enter")
     log.info("Enter → submit формы, жду главный экран…")
     time.sleep(5.0)  # сетевая сторона signin на слабом VPS отзывается с лагом
+
+    # Переключаем фазу: login-форма ушла, дальше идут welcome → tour → close_x.
+    # _dismiss_customize_wizard_step теперь будет искать SKIP с порогом 0.65
+    # (для product tour'а LS v2.17.2, который реально матчит ~0.699).
+    global _login_submitted_this_run
+    _login_submitted_this_run = True
+    log.info("login submitted → SKIP threshold переключился на 0.65 для post-login фаз")
 
     # После SIGN IN ждём three_dots, но параллельно чистим всплывающие диалоги
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
