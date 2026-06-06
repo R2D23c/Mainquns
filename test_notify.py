@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Превью уведомлений. Шлёт 3 реальных типа сообщений через ту же функцию
-notify_ntfy и тот же заголовок _ntfy_header, что и боевой код. Эмодзи и
-кириллица живут в этом UTF-8 файле, а не в консоли, поэтому не ломаются.
+"""Превью уведомлений. Шлёт все 4 реальных типа сообщений через ту же
+функцию notify_ntfy и тот же заголовок _ntfy_header, что и боевой код.
+Эмодзи и кириллица живут в этом UTF-8 файле, а не в консоли, поэтому
+не ломаются.
 
 Запуск на машине:  py test_notify.py
 """
@@ -9,18 +10,29 @@ from warmup_api import notify_ntfy, _ntfy_header
 
 hdr = _ntfy_header()  # session: ... \n machine: hostname · дата \n
 
-# 1) обычный прогон с прогрессом — тихое, ✅
+# 1) UI install OK — первый milestone, машина готова — тихое, ✅
 notify_ntfy(
     hdr +
-    "chunks: 5/5 × до 7 = 33 URL\n"
-    "progress: 200/450 URL (44%)\n"
-    "elapsed: 38 мин",
+    "UI install OK 1/2\n"
+    "Запускаю первый API-прогрев в фоне.\n"
+    "RDP можно отключать — дальше всё само.",
     title="warmup OK",
     priority="low",
     tags="white_check_mark",
 )
 
-# 2) цель достигнута — тихое, 🎉
+# 2) cycle complete с прогрессом — тихое, ⚙️
+notify_ntfy(
+    hdr +
+    "chunks: 5/5 × до 7 = 33 URL\n"
+    "progress: 200/450 URL (44%)\n"
+    "elapsed: 38 мин",
+    title="warmup cycle",
+    priority="low",
+    tags="gear",
+)
+
+# 3) цель достигнута — тихое, 🎉
 notify_ntfy(
     hdr +
     "this run: 96 URL (41 мин)\n"
@@ -31,7 +43,7 @@ notify_ntfy(
     tags="tada",
 )
 
-# 3) падение — со звуком, ⚠️
+# 4) падение — со звуком, ⚠️
 notify_ntfy(
     hdr +
     "error: чанк 3/14: start_warmup → HTTP 409 "
@@ -41,4 +53,4 @@ notify_ntfy(
     tags="warning",
 )
 
-print("3 уведомления отправлены. Проверь Telegram / ntfy.")
+print("4 уведомления отправлены. Проверь Telegram / ntfy.")

@@ -142,7 +142,8 @@ def load_session_name() -> str:
 
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
 # подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
-_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️", "hourglass_flowing_sand": "⏳"}
+_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️",
+              "hourglass_flowing_sand": "⏳", "gear": "⚙️"}
 # ntfy JSON-priority — число 1..5. Маппим из наших строковых уровней.
 _PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
 
@@ -1103,9 +1104,9 @@ def run() -> int:
                 f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {urls_warmed_now} URL\n"
                 f"progress: {new_total}/{target} URL ({100*new_total//target}%)\n"
                 f"elapsed: {elapsed/60:.0f} мин",
-                title="warmup OK",
+                title="warmup cycle",
                 priority="low",
-                tags="white_check_mark",
+                tags="gear",
             )
         return 0
 

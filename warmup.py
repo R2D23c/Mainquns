@@ -350,7 +350,8 @@ def _ntfy_header() -> str:
 
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
 # подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
-_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️"}
+_TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️",
+              "hourglass_flowing_sand": "⏳", "gear": "⚙️"}
 _PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
 
 
