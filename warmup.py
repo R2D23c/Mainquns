@@ -81,6 +81,13 @@ API_ACTIVATED_FLAG = ROOT / ".api_activated"
 # Первый запуск импортит xlsx из session_imports/, дальше только warmup.
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 SESSION_IMPORTS_DIR = ROOT / "session_imports"
+# Флаг, что 'Customize your experience' wizard уже пройден на этой машине.
+# Wizard LS показывает РОВНО ОДИН РАЗ за всю жизнь LS-установки.
+# После первого успешного клика по финальной кнопке (get_started/get_started2/skip)
+# пишем флаг, и в дальнейших запусках _dismiss_customize_wizard_step возвращает
+# False мгновенно — никаких PNG-сканов и шанса false-positive на login-форме.
+# Флаг НЕ удаляется freshstart.bat (одноразовый, переживает clean restart).
+WIZARD_DISMISSED_FLAG = ROOT / ".wizard_dismissed"
 
 
 def setup_logging() -> logging.Logger:
@@ -974,6 +981,16 @@ def _press_enter_on_wizard() -> bool:
         pyautogui.press("enter")
         log.info("wizard: PNG не нашёл, отправил Enter в 'Customize your experience'")
         time.sleep(1.5)
+        # Если окно 'Customize your experience' БОЛЬШЕ НЕ открыто — Enter
+        # дожал последнюю кнопку и wizard закрылся → пишем флаг.
+        if not _find_window_by_title_substring("Customize your experience"):
+            try:
+                WIZARD_DISMISSED_FLAG.touch()
+                log.info("wizard: Enter закрыл wizard, пишу флаг %s",
+                         WIZARD_DISMISSED_FLAG.name)
+            except Exception as e:
+                log.warning("не смог записать %s: %s",
+                            WIZARD_DISMISSED_FLAG.name, e)
         return True
     except Exception as e:
         log.warning("wizard: Enter fallback failed: %s", e)
@@ -995,6 +1012,11 @@ def _dismiss_customize_wizard_step() -> bool:
     Когда все исчезнут — функция вернёт False, поток пойдёт дальше."""
     global _skip_clicked_at
     if sys.platform != "win32":
+        return False
+
+    # Wizard уже пройден один раз — не сканируем PNG больше никогда.
+    # Это полностью исключает любые false-positive на login/main экранах.
+    if WIZARD_DISMISSED_FLAG.exists():
         return False
 
     hwnd = _find_ls_window()
@@ -1045,6 +1067,18 @@ def _dismiss_customize_wizard_step() -> bool:
             pyautogui.click(pt[0], pt[1])
             if tpl_name == "skip":
                 _skip_clicked_at = time.time()
+            # get_started / get_started2 = финальная кнопка wizard'а.
+            # После её клика wizard закрылся → пишем флаг, чтобы при следующих
+            # запусках вообще не сканировать PNG (исключаем false-positive
+            # на login-форме и экономим CPU).
+            if tpl_name in ("get_started", "get_started2"):
+                try:
+                    WIZARD_DISMISSED_FLAG.touch()
+                    log.info("wizard: финальная кнопка нажата, пишу флаг %s",
+                             WIZARD_DISMISSED_FLAG.name)
+                except Exception as e:
+                    log.warning("не смог записать %s: %s",
+                                WIZARD_DISMISSED_FLAG.name, e)
             time.sleep(1.5)
             return True
     # PNG ни один не сматчился — пробуем клавиатурный fallback
