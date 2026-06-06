@@ -958,21 +958,55 @@ _skip_clicked_at: float = 0.0
 _CLOSE_X_GRACE_AFTER_SKIP = 30.0
 
 
+def _window_looks_like_wizard(hwnd: int) -> bool:
+    """Проверяет, выглядит ли окно как 'Customize your experience' wizard
+    через PNG-маркеры с ПОНИЖЕННЫМ confidence (0.60). Используется когда
+    title окна = просто 'Linken Sphere 2' и нельзя отличить wizard
+    от главного экрана / экрана логина по одному только заголовку."""
+    if sys.platform != "win32":
+        return False
+    rect = _RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    # next_step / get_started / get_started2 — wizard-специфичные кнопки.
+    # На login-форме их нет, на главном экране тоже. False positive почти
+    # невозможен.
+    for tpl in ("next_step", "get_started", "get_started2"):
+        if not (TEMPLATES_DIR / f"{tpl}.png").exists():
+            continue
+        pt = _match_template_in_region(
+            tpl, 0.60,
+            rect.left, rect.top, rect.right, rect.bottom,
+        )
+        if pt is not None:
+            log.info("wizard-маркер: %s найден @(%d,%d) → это wizard, не login",
+                     tpl.upper(), *pt)
+            return True
+    return False
+
+
 def _press_enter_on_wizard() -> bool:
     """Fallback когда PNG-шаблоны кнопок wizard не матчат (LS обновил UI).
     Кнопка NEXT STEP / GET STARTED на каждом экране wizard'а по дефолту
     в фокусе (видна синяя обводка) — Enter её нажмёт. Робастно к смене
-    темы / шрифта / геометрии."""
+    темы / шрифта / геометрии.
+
+    Сначала пробуем окно по точному substring 'Customize your experience'.
+    Если такого нет — берём любое 'Linken Sphere' и подтверждаем что это
+    wizard через PNG-маркеры с пониженным порогом (0.60)."""
     if sys.platform != "win32":
         return False
     hwnd = _find_window_by_title_substring("Customize your experience")
     if not hwnd:
-        return False
+        # На новых версиях LS wizard может иметь title 'Linken Sphere 2'
+        # (как у главного окна) — тогда требуется доп. валидация по PNG.
+        hwnd = _find_window_by_title_substring("Linken Sphere")
+        if not hwnd or not _window_looks_like_wizard(hwnd):
+            return False
     try:
         ctypes.windll.user32.SetForegroundWindow(hwnd)
         time.sleep(0.3)
         pyautogui.press("enter")
-        log.info("wizard: PNG не нашёл, отправил Enter в 'Customize your experience'")
+        log.info("wizard: отправил Enter (hwnd=%d)", hwnd)
         time.sleep(1.5)
         return True
     except Exception as e:
@@ -1007,10 +1041,14 @@ def _dismiss_customize_wizard_step() -> bool:
     lower_half_top = rect.top + h // 2
 
     # (имя шаблона, top границы поиска, confidence)
+    # next_step / get_started — 0.70 (раньше 0.80): на новых версиях LS
+    # реальный match опускается до 0.71-0.73 из-за смены шрифта/глифа
+    # стрелки. Это всё ещё distinct (на login-форме / главном их нет),
+    # false positive почти невозможен.
     candidates = [
-        ("next_step",    lower_half_top, 0.80),
-        ("get_started",  lower_half_top, 0.80),
-        ("get_started2", lower_half_top, 0.80),
+        ("next_step",    lower_half_top, 0.70),
+        ("get_started",  lower_half_top, 0.70),
+        ("get_started2", lower_half_top, 0.70),
         ("skip",         rect.top,       0.85),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
@@ -1132,6 +1170,23 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
             did = True
         if not did:
             break
+
+    # ОТДЕЛЬНАЯ защита от перепутывания wizard'а с login-формой:
+    # на новых LS title окна wizard'а = 'Linken Sphere 2' (как у главного),
+    # и _find_auth_window() выберет wizard как auth-window. Если кликать
+    # пропорционально — попадаем мимо. Поэтому проверяем wizard-маркеры
+    # по PNG и гоняем Enter пока wizard не исчезнет (до 60 сек).
+    wizard_deadline = time.time() + 60.0
+    while time.time() < wizard_deadline:
+        if not _window_looks_like_wizard(hwnd):
+            break
+        log.info("login_if_needed: окно похоже на wizard, отправляю Enter…")
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+        pyautogui.press("enter")
+        time.sleep(2.0)
+    else:
+        log.warning("login_if_needed: wizard не исчез за 60с, всё равно продолжаю")
 
     screenshot("login_screen", cfg.getboolean("logging", "screenshots"))
 
