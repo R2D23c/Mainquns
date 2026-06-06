@@ -1183,37 +1183,47 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
                   win_w, win_h, rect.left, rect.top)
         return
 
-    # Пропорции замерены по скриншоту: Email=43%, Password=52%, SIGN IN=68% от высоты
-    email_y    = rect.top + int(win_h * 0.434)
-    password_y = rect.top + int(win_h * 0.521)
-    signin_y   = rect.top + int(win_h * 0.678)
-
     log.info("окно %dx%d @ (%d,%d)", win_w, win_h, rect.left, rect.top)
-    log.info("email=(%d,%d) password=(%d,%d) signin=(%d,%d)",
-             cx, email_y, cx, password_y, cx, signin_y)
 
+    # Tab-навигация вместо клика по пропорциям окна.
+    # Старая логика клацала по 43%/52%/68% от высоты окна; на свежих
+    # машинах LS открывает форму высоким окном (2560x1440 monitor →
+    # большое окно с центрированной формой), и проценты от ОКНА промахивались
+    # мимо формы — поля оставались пустыми, SIGN IN coord попадал
+    # в SIGN UP / FORGOT PASSWORD ниже.
+    # Tab-paradigm независим от размера окна: фокус → Tab → input → Tab → input → Enter.
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.5)
 
     creds = load_credentials()
 
-    _record_click(cx, email_y, "email")
-    pyautogui.click(cx, email_y)
-    time.sleep(0.3)
+    # Один клик в верхний край окна (под title bar) — снимает фокус с
+    # случайных элементов wizard'а / тура и переводит на LS Electron.
+    safe_y = rect.top + 80
+    log.info("focus click @(%d,%d) — снять фокус с wizard/tour", cx, safe_y)
+    pyautogui.click(cx, safe_y)
+    time.sleep(0.4)
+
+    # Tab → Email (первый input в форме)
+    pyautogui.press("tab")
+    time.sleep(0.25)
     pyautogui.hotkey("ctrl", "a")
     _type_via_clipboard(creds.get("account", "email"))
+    log.info("email вставлен")
 
-    _record_click(cx, password_y, "password")
-    pyautogui.click(cx, password_y)
-    time.sleep(0.3)
+    # Tab → Password
+    pyautogui.press("tab")
+    time.sleep(0.25)
     pyautogui.hotkey("ctrl", "a")
     _type_via_clipboard(creds.get("account", "password"))
+    log.info("password вставлен")
 
     screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
 
-    _record_click(cx, signin_y, "sign_in")
-    pyautogui.click(cx, signin_y)
-    log.info("нажат SIGN IN, жду главный экран…")
+    # Enter на password-поле → submit формы. Это стандартное web/Electron
+    # поведение, не зависит от того, где находится кнопка SIGN IN.
+    pyautogui.press("enter")
+    log.info("Enter → submit формы, жду главный экран…")
     time.sleep(5.0)  # сетевая сторона signin на слабом VPS отзывается с лагом
 
     # После SIGN IN ждём three_dots, но параллельно чистим всплывающие диалоги
