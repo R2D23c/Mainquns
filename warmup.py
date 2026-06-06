@@ -958,6 +958,28 @@ _skip_clicked_at: float = 0.0
 _CLOSE_X_GRACE_AFTER_SKIP = 30.0
 
 
+def _press_enter_on_wizard() -> bool:
+    """Fallback когда PNG-шаблоны кнопок wizard не матчат (LS обновил UI).
+    Кнопка NEXT STEP / GET STARTED на каждом экране wizard'а по дефолту
+    в фокусе (видна синяя обводка) — Enter её нажмёт. Робастно к смене
+    темы / шрифта / геометрии."""
+    if sys.platform != "win32":
+        return False
+    hwnd = _find_window_by_title_substring("Customize your experience")
+    if not hwnd:
+        return False
+    try:
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+        pyautogui.press("enter")
+        log.info("wizard: PNG не нашёл, отправил Enter в 'Customize your experience'")
+        time.sleep(1.5)
+        return True
+    except Exception as e:
+        log.warning("wizard: Enter fallback failed: %s", e)
+        return False
+
+
 def _dismiss_customize_wizard_step() -> bool:
     """При первом запуске LS показывает мастер настройки ВНУТРИ окна Linken Sphere
     (отдельного top-level окна у мастера нет). Ищем кнопки внутри окна LS —
@@ -1025,6 +1047,10 @@ def _dismiss_customize_wizard_step() -> bool:
                 _skip_clicked_at = time.time()
             time.sleep(1.5)
             return True
+    # PNG ни один не сматчился — пробуем клавиатурный fallback
+    # (NEXT STEP / GET STARTED всегда в фокусе на каждом экране wizard'а)
+    if _press_enter_on_wizard():
+        return True
     return False
 
 
