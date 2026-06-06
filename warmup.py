@@ -1027,13 +1027,15 @@ def _dismiss_customize_wizard_step() -> bool:
         ("next_step",    lower_half_top, 0.80),
         ("get_started",  lower_half_top, 0.80),
         ("get_started2", lower_half_top, 0.80),
-        # skip: понижен с 0.85 → 0.65 — в LS v2.17.2+ появился 28-шаговый
-        # продуктовый тур ('Account and teams... 1/28') поверх главного
-        # дашборда после первого логина. Реальный матч skip-кнопки тура
-        # — 0.699, что было ниже старого порога 0.85. False-positive
-        # маловероятен: skip — мелкая кнопка 53×31, в отличие от
-        # next_step (440×74) который раньше ложно матчился на SIGN IN.
-        ("skip",         rect.top,       0.65),
+        # skip: вернул 0.85. Пробовал понизить до 0.65 (для tour'а в
+        # LS v2.17.2), но получили false-positive на login-форме:
+        # маленький SIGN UP link визуально матчит skip.png и кликается,
+        # что закрывает auth-окно (LS открывает регистрацию). После
+        # этого rect становится 0×0 и login_if_needed отваливается.
+        # Product tour на свежем LS придётся проходить руками один раз —
+        # после welcome get_started2 пишется флаг .wizard_dismissed,
+        # и dismiss-handler отключается на всех последующих запусках.
+        ("skip",         rect.top,       0.85),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
