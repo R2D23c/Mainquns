@@ -1389,8 +1389,8 @@ def load_session_name() -> str:
 
 def prepare_session_xlsx(session_name: str) -> Path:
     """Если session_imports/<name>.xlsx уже есть — возвращаем путь.
-    Иначе клонируем session_imports/_template.xlsx, ставим A3 = session_name,
-    сохраняем под нужным именем. Возвращаем путь к готовому файлу."""
+    Иначе генерим из session_imports/_template.xlsx с рандомным fingerprint
+    (см. session_template.build_session_xlsx). Возвращаем путь к готовому файлу."""
     target = SESSION_IMPORTS_DIR / f"{session_name}.xlsx"
     if target.exists():
         return target
@@ -1400,11 +1400,8 @@ def prepare_session_xlsx(session_name: str) -> Path:
             f"не найден шаблон импорта сессии: {template}. "
             f"Должен лежать в репозитории."
         )
-    import openpyxl  # ленивый импорт — нужен только при первой установке
-    wb = openpyxl.load_workbook(template)
-    ws = wb[wb.sheetnames[0]]
-    ws["A3"] = session_name
-    wb.save(target)
+    from session_template import build_session_xlsx
+    build_session_xlsx(template, target, session_name)
     log.info("создан xlsx сессии: %s (A3=%s)", target, session_name)
     return target
 
