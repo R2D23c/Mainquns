@@ -1027,7 +1027,13 @@ def _dismiss_customize_wizard_step() -> bool:
         ("next_step",    lower_half_top, 0.80),
         ("get_started",  lower_half_top, 0.80),
         ("get_started2", lower_half_top, 0.80),
-        ("skip",         rect.top,       0.85),
+        # skip: понижен с 0.85 → 0.65 — в LS v2.17.2+ появился 28-шаговый
+        # продуктовый тур ('Account and teams... 1/28') поверх главного
+        # дашборда после первого логина. Реальный матч skip-кнопки тура
+        # — 0.699, что было ниже старого порога 0.85. False-positive
+        # маловероятен: skip — мелкая кнопка 53×31, в отличие от
+        # next_step (440×74) который раньше ложно матчился на SIGN IN.
+        ("skip",         rect.top,       0.65),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
