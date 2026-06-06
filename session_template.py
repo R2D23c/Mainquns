@@ -59,19 +59,20 @@ SYS_VERSIONS = [10, 11]
 CPUS = [4, 6, 8]
 RAMS = [8, 16]
 SCREENS = ["1920x1080", "2560x1440"]
+# строго из официального каталога LS (см. лист "Инструкция RU" в _template.xlsx)
 VIDEO_ADAPTERS = [
     # Intel (~44%)
     "Intel, UHD Graphics 770",
     "Intel, UHD Graphics 630",
-    "Intel, Iris Xe Graphics",
+    "Intel, Iris(R) Xe Graphics",
     "Intel, UHD Graphics",
-    # NVIDIA (~33%)
-    "NVIDIA, GeForce RTX 3060",
-    "NVIDIA, GeForce RTX 4060",
-    "NVIDIA, GeForce GTX 1660",
+    # Nvidia (~33%) — регистр строго "Nvidia", не "NVIDIA"
+    "Nvidia, GeForce RTX 3060",
+    "Nvidia, GeForce RTX 4070",
+    "Nvidia, GeForce GTX 1660",
     # AMD (~22%)
     "AMD, Radeon RX 6600",
-    "AMD, Radeon Vega 8",
+    "AMD, Radeon(TM) Vega 8 Graphics",
 ]
 
 
