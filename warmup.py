@@ -81,13 +81,6 @@ API_ACTIVATED_FLAG = ROOT / ".api_activated"
 # Первый запуск импортит xlsx из session_imports/, дальше только warmup.
 SESSION_IMPORTED_FLAG = ROOT / ".session_imported"
 SESSION_IMPORTS_DIR = ROOT / "session_imports"
-# Флаг, что 'Customize your experience' wizard уже пройден на этой машине.
-# Wizard LS показывает РОВНО ОДИН РАЗ за всю жизнь LS-установки.
-# После первого успешного клика по финальной кнопке (get_started/get_started2/skip)
-# пишем флаг, и в дальнейших запусках _dismiss_customize_wizard_step возвращает
-# False мгновенно — никаких PNG-сканов и шанса false-positive на login-форме.
-# Флаг НЕ удаляется freshstart.bat (одноразовый, переживает clean restart).
-WIZARD_DISMISSED_FLAG = ROOT / ".wizard_dismissed"
 
 
 def setup_logging() -> logging.Logger:
@@ -963,41 +956,6 @@ def _find_ls_window() -> int:
 # самой LS на повторных запусках, когда попапа со скипом уже нет.
 _skip_clicked_at: float = 0.0
 _CLOSE_X_GRACE_AFTER_SKIP = 30.0
-# Стейт-переключатель фазы. False = до логина (логин-форма ещё показана,
-# SIGN UP link может false-positively сматчиться с skip.png). True = после
-# успешного Enter в login_if_needed (логин-формы больше нет, видны
-# welcome / tour / dashboard — там SIGN UP отсутствует, безопасно
-# использовать пониженный SKIP threshold чтобы поймать product-tour SKIP).
-# Юзер подтвердил: login ВСЕГДА показывается при каждом запуске LS,
-# поэтому переменная гарантированно переключится в True в каждом процессе
-# warmup.py после Enter.
-_login_submitted_this_run: bool = False
-
-
-def _press_enter_on_wizard() -> bool:
-    """Fallback когда PNG-шаблоны кнопок wizard не матчат (LS обновил UI).
-    Кнопка NEXT STEP / GET STARTED на каждом экране wizard'а по дефолту
-    в фокусе (видна синяя обводка) — Enter её нажмёт. Робастно к смене
-    темы / шрифта / геометрии."""
-    if sys.platform != "win32":
-        return False
-    hwnd = _find_window_by_title_substring("Customize your experience")
-    if not hwnd:
-        return False
-    try:
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-        pyautogui.press("enter")
-        log.info("wizard: PNG не нашёл, отправил Enter в 'Customize your experience'")
-        time.sleep(1.5)
-        # Флаг WIZARD_DISMISSED_FLAG здесь НЕ пишем: Enter закрывает только
-        # первый Customize-wizard, но впереди ещё post-login welcome
-        # ('Welcome to Linken Sphere 2'), который кликается через get_started2.
-        # Флаг ставится ТОЛЬКО там — иначе welcome не успеет закликаться.
-        return True
-    except Exception as e:
-        log.warning("wizard: Enter fallback failed: %s", e)
-        return False
 
 
 def _dismiss_customize_wizard_step() -> bool:
@@ -1017,11 +975,6 @@ def _dismiss_customize_wizard_step() -> bool:
     if sys.platform != "win32":
         return False
 
-    # Wizard уже пройден один раз — не сканируем PNG больше никогда.
-    # Это полностью исключает любые false-positive на login/main экранах.
-    if WIZARD_DISMISSED_FLAG.exists():
-        return False
-
     hwnd = _find_ls_window()
     if not hwnd:
         return False
@@ -1032,22 +985,11 @@ def _dismiss_customize_wizard_step() -> bool:
     lower_half_top = rect.top + h // 2
 
     # (имя шаблона, top границы поиска, confidence)
-    # SKIP threshold адаптивный по фазе:
-    #   - ДО логина (форма Authentication ещё на экране): 0.85 — защита от
-    #     false-positive на SIGN UP link под SIGN IN. Этот link визуально
-    #     матчит skip.png при ~0.699; если бы порог был ниже, мы бы кликали
-    #     на SIGN UP, закрывали auth-окно (LS открывает регистрацию),
-    #     получали rect 0×0 и проваливали login.
-    #   - ПОСЛЕ логина (Enter уже нажат, _login_submitted_this_run=True):
-    #     0.65 — реальный matchпродуктового тура LS v2.17.2 ~0.699,
-    #     SIGN UP больше не виден (login-форма ушла), false-positive
-    #     невозможен.
-    skip_threshold = 0.65 if _login_submitted_this_run else 0.85
     candidates = [
         ("next_step",    lower_half_top, 0.80),
         ("get_started",  lower_half_top, 0.80),
         ("get_started2", lower_half_top, 0.80),
-        ("skip",         rect.top,       skip_threshold),
+        ("skip",         rect.top,       0.85),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
@@ -1081,28 +1023,8 @@ def _dismiss_customize_wizard_step() -> bool:
             pyautogui.click(pt[0], pt[1])
             if tpl_name == "skip":
                 _skip_clicked_at = time.time()
-            # close_x = ФИНАЛЬНЫЙ экран в пост-логин последовательности
-            # (welcome → tour SKIP → close_x → дашборд). Только после
-            # close_x все wizard-экраны точно пройдены, можно отключить
-            # dismiss-handler навсегда на этой машине.
-            # Раньше флаг ставился на get_started2 (welcome) — это была
-            # ошибка: tour и close_x ещё впереди, а handler уже выключался,
-            # и SKIP в туре никогда не пытался кликнуться → three_dots
-            # не появлялись → timeout 120с.
-            if tpl_name == "close_x":
-                try:
-                    WIZARD_DISMISSED_FLAG.touch()
-                    log.info("wizard: close_x пройден (финал), пишу флаг %s",
-                             WIZARD_DISMISSED_FLAG.name)
-                except Exception as e:
-                    log.warning("не смог записать %s: %s",
-                                WIZARD_DISMISSED_FLAG.name, e)
             time.sleep(1.5)
             return True
-    # PNG ни один не сматчился — пробуем клавиатурный fallback
-    # (NEXT STEP / GET STARTED всегда в фокусе на каждом экране wizard'а)
-    if _press_enter_on_wizard():
-        return True
     return False
 
 
@@ -1198,55 +1120,38 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
                   win_w, win_h, rect.left, rect.top)
         return
 
-    log.info("окно %dx%d @ (%d,%d)", win_w, win_h, rect.left, rect.top)
+    # Пропорции замерены по скриншоту: Email=43%, Password=52%, SIGN IN=68% от высоты
+    email_y    = rect.top + int(win_h * 0.434)
+    password_y = rect.top + int(win_h * 0.521)
+    signin_y   = rect.top + int(win_h * 0.678)
 
-    # Tab-навигация вместо клика по пропорциям окна.
-    # Старая логика клацала по 43%/52%/68% от высоты окна; на свежих
-    # машинах LS открывает форму высоким окном (2560x1440 monitor →
-    # большое окно с центрированной формой), и проценты от ОКНА промахивались
-    # мимо формы — поля оставались пустыми, SIGN IN coord попадал
-    # в SIGN UP / FORGOT PASSWORD ниже.
-    # Tab-paradigm независим от размера окна: фокус → Tab → input → Tab → input → Enter.
+    log.info("окно %dx%d @ (%d,%d)", win_w, win_h, rect.left, rect.top)
+    log.info("email=(%d,%d) password=(%d,%d) signin=(%d,%d)",
+             cx, email_y, cx, password_y, cx, signin_y)
+
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.5)
 
     creds = load_credentials()
 
-    # Один клик в верхний край окна (под title bar) — снимает фокус с
-    # случайных элементов wizard'а / тура и переводит на LS Electron.
-    safe_y = rect.top + 80
-    log.info("focus click @(%d,%d) — снять фокус с wizard/tour", cx, safe_y)
-    pyautogui.click(cx, safe_y)
-    time.sleep(0.4)
-
-    # Tab → Email (первый input в форме)
-    pyautogui.press("tab")
-    time.sleep(0.25)
+    _record_click(cx, email_y, "email")
+    pyautogui.click(cx, email_y)
+    time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
     _type_via_clipboard(creds.get("account", "email"))
-    log.info("email вставлен")
 
-    # Tab → Password
-    pyautogui.press("tab")
-    time.sleep(0.25)
+    _record_click(cx, password_y, "password")
+    pyautogui.click(cx, password_y)
+    time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
     _type_via_clipboard(creds.get("account", "password"))
-    log.info("password вставлен")
 
     screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
 
-    # Enter на password-поле → submit формы. Это стандартное web/Electron
-    # поведение, не зависит от того, где находится кнопка SIGN IN.
-    pyautogui.press("enter")
-    log.info("Enter → submit формы, жду главный экран…")
+    _record_click(cx, signin_y, "sign_in")
+    pyautogui.click(cx, signin_y)
+    log.info("нажат SIGN IN, жду главный экран…")
     time.sleep(5.0)  # сетевая сторона signin на слабом VPS отзывается с лагом
-
-    # Переключаем фазу: login-форма ушла, дальше идут welcome → tour → close_x.
-    # _dismiss_customize_wizard_step теперь будет искать SKIP с порогом 0.65
-    # (для product tour'а LS v2.17.2, который реально матчит ~0.699).
-    global _login_submitted_this_run
-    _login_submitted_this_run = True
-    log.info("login submitted → SKIP threshold переключился на 0.65 для post-login фаз")
 
     # После SIGN IN ждём three_dots, но параллельно чистим всплывающие диалоги
     timeout = cfg.getfloat("startup", "launch_wait_seconds")
