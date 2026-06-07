@@ -355,7 +355,7 @@ _TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️",
 _PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
 
 
-def notify_ntfy(message: str, title: str = "warmup failed",
+def notify_ntfy(message: str, title: str = "warmup failed (ui)",
                 priority: str = "high", tags: str = "warning") -> None:
     """Шлёт push через ntfy.sh JSON-публикацией, без настройки на машине.
     Все ошибки (сети нет, сервис лежит, и т.д.) глотаются — нотификация

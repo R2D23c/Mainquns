@@ -33,6 +33,7 @@ if exist "%~dp0.warmup_count"     del /q "%~dp0.warmup_count"
 if exist "%~dp0.warmup_started_at" del /q "%~dp0.warmup_started_at"
 if exist "%~dp0.notified_done"    del /q "%~dp0.notified_done"
 if exist "%~dp0.first_start"      del /q "%~dp0.first_start"
+if exist "%~dp0.wizard_dismissed" del /q "%~dp0.wizard_dismissed"
 
 for /f "delims=" %%f in ('dir /b /a-d "%~dp0session_imports\CL-*.xlsx" 2^>nul') do (
     del /q "%~dp0session_imports\%%f"
