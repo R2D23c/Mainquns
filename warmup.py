@@ -970,8 +970,16 @@ def _dismiss_customize_wizard_step() -> bool:
       - close_x         — финальный мелкий крестик ✕ на следующем после skip окне;
                           ищется ТОЛЬКО в течение 30с после клика на skip,
                           чтобы не зацепить close-кнопку самого LS
-    Когда все исчезнут — функция вернёт False, поток пойдёт дальше."""
+    Когда все исчезнут — функция вернёт False, поток пойдёт дальше.
+
+    Если в C:\\warmup\\ лежит флаг .wizards_done — мгновенно возвращаем False
+    без single PNG-скана. Это для машин где LS уже был запущен раньше и
+    мастер первого запуска / tour / welcome / close_x уже пройдены вручную
+    или предыдущим прогоном. Ставится флаг через quickstart.ps1 один раз,
+    дальше переживает любой freshstart."""
     global _skip_clicked_at
+    if (ROOT / ".wizards_done").exists():
+        return False
     if sys.platform != "win32":
         return False
 
@@ -1669,6 +1677,9 @@ def run() -> int:
     shots = cfg.getboolean("logging", "screenshots")
     log.info("=" * 60)
     log.info("Linken Sphere UI install: старт")
+    if (ROOT / ".wizards_done").exists():
+        log.info("режим quickstart: флаг .wizards_done — wizard / tour / close_x "
+                 "не сканирую (LS уже был запущен ранее на этой машине)")
 
     try:
         # 0. Запустить Linken Sphere 2, если ещё не запущен

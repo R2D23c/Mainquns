@@ -20,3 +20,4 @@ urls_generated/
 cookies_export/
 .warmup_started_at
 .wizard_dismissed
+.wizards_done
