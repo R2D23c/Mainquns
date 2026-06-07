@@ -392,13 +392,26 @@ def load_url_pool(cfg: configparser.ConfigParser) -> list[str]:
 
 
 def materialize_run_urls(
-    pool: list[str], cfg: configparser.ConfigParser
+    pool: list[str], cfg: configparser.ConfigParser,
+    max_n: int | None = None,
 ) -> tuple[Path, list[str]]:
     """Сэмплит ~100 случайных URL из пула (urls_per_run_min..max), пишет
-    файлом в urls_generated/run_<ts>.txt для audit. Возвращает (файл, urls)."""
+    файлом в urls_generated/run_<ts>.txt для audit. Возвращает (файл, urls).
+
+    max_n — если задан и меньше случайно выбранного n, ограничиваем выборку
+    этим числом. Нужно для финального цикла, когда до target осталось
+    меньше полного цикла — иначе перебираем на +50-90 URL сверх задумки.
+    Нижняя граница — chunk_size (7 URL = 1 чанк), чтобы как минимум один
+    проход всё-таки сделать (random.sample требует n>=1, и downstream chunk-
+    loop ожидает непустой список)."""
     n_min = cfg.getint("api", "urls_per_run_min", fallback=95)
     n_max = cfg.getint("api", "urls_per_run_max", fallback=105)
     n = min(random.randint(n_min, n_max), len(pool))
+    if max_n is not None and max_n < n:
+        chunk_size = cfg.getint("api", "urls_per_chunk_max", fallback=7)
+        n = max(chunk_size, max_n)
+        log.info("остаток до target = %d URL < полный цикл — clip выборки до %d URL",
+                 max_n, n)
     urls = random.sample(pool, n)
 
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -934,7 +947,9 @@ def run() -> int:
         log.info("используем uuid=%s (name=%r)", uuid, sess.get("name"))
 
         pool = load_url_pool(cfg)
-        run_file, urls = materialize_run_urls(pool, cfg)
+        # remaining > 0 гарантировано: выше был return 0 при current >= target
+        remaining = target - current
+        run_file, urls = materialize_run_urls(pool, cfg, max_n=remaining)
         log.info("план: %d URL (пул %d) view_depth=%d time_per_url=%d",
                  len(urls), len(pool), view_depth, time_per_url)
 
