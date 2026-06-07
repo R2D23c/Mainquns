@@ -386,9 +386,25 @@ def notify_ntfy(message: str, title: str = "warmup failed (ui)",
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        log.info("ntfy-уведомление отправлено (%s)", disp_title)
+        # Retry на transient SSL/timeout hiccups. ntfy.sh на здоровом VPS
+        # отвечает <1с, но изредка TLS handshake забуксует — без retry'я
+        # уведомление теряется навсегда. 3 попытки с timeout=30с и
+        # backoff'ом 2с/5с покрывают любой разумный transient hiccup.
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+                log.info("ntfy-уведомление отправлено (%s)", disp_title)
+                return
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    backoff = 2 if attempt == 0 else 5
+                    log.info("notify_ntfy попытка %d/3 не прошла (%s) — backoff %dс",
+                             attempt + 1, e, backoff)
+                    time.sleep(backoff)
+        log.warning("notify_ntfy failed после 3 попыток: %s", last_err)
     except Exception as e:
         log.warning("notify_ntfy failed: %s", e)
 
