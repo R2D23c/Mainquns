@@ -48,7 +48,15 @@ FIXED = {
     "R": "fake",             # canvas
     "S": "fake",             # webgl   (было "noise" в шаблоне)
     "T": "fake",             # client rects (было "noise")
-    "U": "fake",             # audio   (было "direct" — главный риск)
+    "U": "direct",           # audio — OfflineAudioContext генерит в RAM, не лезет в
+                             #         аппаратную звуковую подсистему → на Server 2022
+                             #         без звуковой карты direct БЕЗОПАСЕН и неотличим
+                             #         от обычного Chromium-on-Windows. LS-индикатор
+                             #         показывает "close to real" против "too unique"
+                             #         у noise/fake. Кроме того, noise детектируется
+                             #         repeat-call тестом (Safari 17 публично описал
+                             #         методику) — анти-фрод видит что hash плавает
+                             #         между обращениями и игнорит fingerprint.
     "V": "fake",             # webgpu
     "W": "fake",             # media devices
     "X": "",                 # import cookies пусто
