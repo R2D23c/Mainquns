@@ -1329,19 +1329,49 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     """
     Нативный Windows-диалог открытия файла.
     Самый надёжный способ — вставить полный путь в поле "Имя файла" и нажать Enter.
+
+    На слабых VPS (2 ядра, медленный диск) диалог может отрисовываться
+    10+ секунд. Поллим появление top-level окна с типичным заголовком
+    Open File-dialog (EN/RU) до 30 секунд. Когда окно найдено — даём
+    ещё 1.5с на полную отрисовку поля File name, чтобы Alt+N точно
+    попал по нужному инпуту, а не в недорисованную форму.
     """
-    time.sleep(3.0)  # нативный диалог Windows на 2-ядерном VPS отрисовывается дольше
+    # 1) Ждём появления окна диалога (заголовок 'Open' / 'Открытие') до 30с
+    dialog_substrings = ["open", "открытие", "открыть"]
+    poll_deadline = time.time() + 30.0
+    t_start = time.time()
+    dialog_hwnd = 0
+    while time.time() < poll_deadline:
+        for sub in dialog_substrings:
+            hwnd = _find_window_by_title_substring(sub)
+            if hwnd:
+                dialog_hwnd = hwnd
+                break
+        if dialog_hwnd:
+            break
+        time.sleep(0.4)
+    if dialog_hwnd:
+        log.info("open-dialog hwnd=%d найден за %.1fс", dialog_hwnd, time.time() - t_start)
+        # Дать диалогу полностью отрисовать поле File name
+        time.sleep(1.5)
+    else:
+        # На некоторых сборках Windows заголовок может быть локализованным
+        # неожиданно — не падаем, идём вслепую с большим запасом времени.
+        log.warning("open-dialog не найден по заголовку за 30с — продолжаем с генерируемым sleep")
+        time.sleep(5.0)
+
     screenshot("06_open_dialog", cfg.getboolean("logging", "screenshots"))
     # focus на поле "File name" — стандартно открыто по умолчанию
     pyautogui.hotkey("alt", "n")  # Alt+N → File name (en)
-    time.sleep(0.5)
+    time.sleep(1.0)  # было 0.5 — даём фокусу осесть на поле
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("delete")
+    time.sleep(0.3)
     # _type_via_clipboard использует SendInput Unicode — на той же скорости,
     # что и pyautogui.typewrite interval=0.01, проглатывал буквы из пути,
     # и Windows ругался «The file name is not valid».
     _type_via_clipboard(file_path)
-    time.sleep(0.3)
+    time.sleep(0.8)  # было 0.3 — даём Windows обработать путь перед Enter
     pyautogui.press("enter")
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
