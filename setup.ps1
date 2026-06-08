@@ -224,6 +224,54 @@ Set-ItemProperty -Path $wuKey -Name "NoAutoRebootWithLoggedOnUsers" -Value 1 -Ty
 Set-ItemProperty -Path $wuKey -Name "AlwaysAutoRebootAtScheduledTime" -Value 0 -Type DWord -Force
 Write-Host "  [OK] auto-reboot blocked while user is logged in (security patches still install)" -ForegroundColor Green
 
+# 4.7 Auto-login Administrator + 24h cleanup task.
+# Включается ТОЛЬКО если оператор передал $env:WINDOWS_ADMIN_PASSWORD.
+# Назначение: пережить host-level reboot (Kernel-Power 41 от провайдера/
+# hypervisor maintenance) без необходимости ручного RDP. После такого ребута
+# Windows сама залогинит Administrator → user session есть → Task Scheduler
+# Interactive task работает → LS Run reg key триггерится (Step 4.8) →
+# pipeline продолжается сам.
+#
+# Безопасность:
+#   - DefaultPassword хранится REG_SZ в plaintext в Winlogon.
+#     Локально на VPS, наружу не уходит. Прочитать может только admin
+#     (который и так имеет полные права).
+#   - Через 24 часа специальный scheduled task ('AutoLoginCleanup')
+#     удаляет DefaultPassword и выставляет AutoAdminLogon=0. После этого
+#     VPS перестаёт автологиниться — если кто-то ребутнет, нужен ручной
+#     RDP, что в нашем случае ОК: к 24h пайплайн уже отдал cookies в
+#     ntfy/Telegram, оператор забирает файл и сносит VPS.
+#
+# Если оператор НЕ передал WINDOWS_ADMIN_PASSWORD — этот шаг тихо
+# пропускается. Pipeline всё равно работает, но после host-reboot
+# потребуется ручной RDP чтобы поднять user session + LS.
+if ($env:WINDOWS_ADMIN_PASSWORD) {
+    Write-Step "Configuring Administrator auto-login (24h self-cleanup)"
+    $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    Set-ItemProperty -Path $winlogon -Name "AutoAdminLogon"  -Value "1"
+    Set-ItemProperty -Path $winlogon -Name "DefaultUserName" -Value "Administrator"
+    Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $env:WINDOWS_ADMIN_PASSWORD
+    Write-Host "  [OK] AutoAdminLogon=1, DefaultUserName=Administrator" -ForegroundColor Green
+
+    # Регистрируем задачу самоуничтожения через 24 часа
+    $cleanupTime = (Get-Date).AddHours(24)
+    $cleanupCmd = "Remove-ItemProperty -Path '$winlogon' -Name DefaultPassword -ErrorAction SilentlyContinue; " +
+                  "Set-ItemProperty -Path '$winlogon' -Name AutoAdminLogon -Value '0'; " +
+                  "schtasks /delete /tn AutoLoginCleanup /f"
+    $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -Command `"$cleanupCmd`""
+    $trigger = New-ScheduledTaskTrigger -Once -At $cleanupTime
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+    Register-ScheduledTask -TaskName "AutoLoginCleanup" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Write-Host "  [OK] AutoLoginCleanup scheduled for $($cleanupTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "[setup] WINDOWS_ADMIN_PASSWORD not set -- auto-login skipped" -ForegroundColor Yellow
+    Write-Host "        After unexpected reboot (Kernel-Power, provider maintenance)" -ForegroundColor Yellow
+    Write-Host "        manual RDP will be required to resume pipeline." -ForegroundColor Yellow
+    Write-Host "        To enable auto-login: re-run setup.ps1 with" -ForegroundColor Yellow
+    Write-Host "        `$env:WINDOWS_ADMIN_PASSWORD = '<your VPS admin password>'" -ForegroundColor Yellow
+}
+
 # 5. schedule_hourly.bat - register the Task Scheduler job
 Write-Step "Registering Task Scheduler job"
 cmd /c "schedule_hourly.bat"
