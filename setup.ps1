@@ -173,6 +173,42 @@ if (-not $unattended) {
 }
 cmd /c "install.bat"
 
+# 4.5 Pre-authorize ВСЕХ binaries в LS install folder в Windows Defender
+# Firewall. Это устраняет Defender popup'ы на:
+#   - main процесс Linken Sphere 2.exe (при первом старте через ShellExecuteW)
+#   - bundled Chromium (всплывает позже, типично на ~20-м чанке прогрева,
+#     когда session-browser открывает достаточно tab'ов / debug-port'ов)
+#   - Squirrel.exe updater и прочие helper'ы внутри install folder
+# Без preauth каждый popup риск что _dismiss_firewall_alert его пропустит
+# (новый Windows build с непокрытым PNG-стилем, отличающийся title и т.п.)
+# → ⚠️ failed (ui) на машине.
+# С preauth Defender молчаливо разрешает inbound для наших бинарей,
+# никаких popup'ов не возникает, и pipeline идёт без задержек.
+Write-Step "Pre-authorizing LS binaries in Windows Firewall"
+$lsFolder = "C:\Program Files (x86)\Linken Sphere 2"
+if (Test-Path $lsFolder) {
+    $exeList = Get-ChildItem -Path $lsFolder -Filter *.exe -Recurse -ErrorAction SilentlyContinue
+    if (-not $exeList) {
+        Write-Host "  [WARN] no .exe found in $lsFolder" -ForegroundColor Yellow
+    }
+    foreach ($exe in $exeList) {
+        foreach ($proto in @("TCP","UDP")) {
+            $ruleName = "LS preauth: $($exe.Name) $proto inbound"
+            # Идемпотентность: повторный setup.ps1 правила не дублирует
+            if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
+                New-NetFirewallRule -DisplayName $ruleName `
+                    -Direction Inbound -Action Allow `
+                    -Protocol $proto -Program $exe.FullName `
+                    -Profile Any `
+                    -ErrorAction SilentlyContinue | Out-Null
+                Write-Host "  [OK] $($exe.Name) $proto" -ForegroundColor Green
+            }
+        }
+    }
+} else {
+    Write-Host "  [WARN] $lsFolder not found -- firewall preauth skipped" -ForegroundColor Yellow
+}
+
 # 5. schedule_hourly.bat - register the Task Scheduler job
 Write-Step "Registering Task Scheduler job"
 cmd /c "schedule_hourly.bat"
