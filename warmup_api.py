@@ -1027,16 +1027,20 @@ def run() -> int:
                 #     (на случай если именно она держит лок зомби-warmup'ом)
                 #     + unlock_blocked_sessions + start_warmup
                 # Только если и nuclear не помог — поднимаем ошибку.
-                # Расширенный 7-step pyramid для multi-VPS контентов: когда
-                # несколько VPS на одном LS-аккаунте, чанк другой машины
-                # держит глобальный API-лок до своего завершения (~2 мин на
-                # один чанк, иногда больше). 30+60-сек ретраи не помогали,
-                # вылетал ⚠️ alert хотя система сама бы поднялась на
-                # следующем scheduler-tick. Теперь добавили 2-мин и 4-мин
-                # ожидания — достаточно чтобы переждать конкурирующий
-                # чанк другой VPS.
+                # Расширенный 9-step pyramid для multi-VPS контентов: когда
+                # несколько VPS на одном LS-аккаунте (наблюдалось до 8 параллельных),
+                # чанк другой машины держит глобальный API-лок до своего завершения
+                # (~2 мин на один чанк, иногда больше). Базовый 7-step не всегда
+                # дотягивает — добавили ступени 8 и 9 с большими ожиданиями (6 и
+                # 8 мин). Worst case на один чанк: ~17 мин ожидания (30+60+120+
+                # 240+360+480 sleeps + nuclear actions).
+                # Task Scheduler interval 45 мин + IgnoreNew: если цикл из-за
+                # удлинённого pyramid'а превысит 45 мин, следующий tick просто
+                # пропустится (без collision/crash), эффективный интервал
+                # станет 90 мин. Trade-off: медленнее, но стабильнее на multi-VPS
+                # аккаунте — меньше ⏳ cycle paused alerts.
                 _last_err: Exception | None = None
-                for attempt in range(7):
+                for attempt in range(9):
                     try:
                         client.start_warmup(uuid, chunk, view_depth, time_per_url)
                         _last_err = None
@@ -1045,29 +1049,29 @@ def run() -> int:
                         msg = str(e)
                         retriable = "HTTP 409" in msg and "Session is used" in msg
                         _last_err = e
-                        if not retriable or attempt == 6:
+                        if not retriable or attempt == 8:
                             break
                         if attempt == 0:
-                            log.warning("чанк %d: 409 'session in use' — sleep 30с, ретрай 2/7", i)
+                            log.warning("чанк %d: 409 'session in use' — sleep 30с, ретрай 2/9", i)
                             time.sleep(30)
                         elif attempt == 1:
-                            log.warning("чанк %d: 409 — sleep 60с, ретрай 3/7", i)
+                            log.warning("чанк %d: 409 — sleep 60с, ретрай 3/9", i)
                             time.sleep(60)
                         elif attempt == 2:
-                            log.warning("чанк %d: 409 после 90с — sleep 2 мин (возможно другой VPS на этом LS-аккаунте), ретрай 4/7", i)
+                            log.warning("чанк %d: 409 после 90с — sleep 2 мин (возможно другой VPS на этом LS-аккаунте), ретрай 4/9", i)
                             time.sleep(120)
                         elif attempt == 3:
-                            log.warning("чанк %d: 409 ещё держится — sleep 4 мин, ретрай 5/7", i)
+                            log.warning("чанк %d: 409 ещё держится — sleep 4 мин, ретрай 5/9", i)
                             time.sleep(240)
                         elif attempt == 4:
-                            log.warning("чанк %d: lock не уходит после 7 мин ожидания — unlock_blocked_sessions + ретрай 6/7", i)
+                            log.warning("чанк %d: lock не уходит после 7 мин ожидания — unlock_blocked_sessions + ретрай 6/9", i)
                             try:
                                 client.unlock_blocked_sessions()
                                 time.sleep(3)
                             except Exception as unlock_e:
                                 log.warning("unlock_blocked_sessions упал: %s", unlock_e)
-                        else:  # attempt == 5
-                            log.warning("чанк %d: nuclear — force_stop своей сессии + последний ретрай 7/7", i)
+                        elif attempt == 5:
+                            log.warning("чанк %d: nuclear — force_stop своей сессии + ретрай 7/9", i)
                             try:
                                 client.force_stop_session(uuid)
                                 time.sleep(5)
@@ -1075,6 +1079,19 @@ def run() -> int:
                                 time.sleep(3)
                             except Exception as nuke_e:
                                 log.warning("nuclear recovery упал: %s", nuke_e)
+                        elif attempt == 6:
+                            log.warning("чанк %d: nuclear не помог — sleep 6 мин (затяжной lock от другой VPS) + ретрай 8/9", i)
+                            time.sleep(360)
+                        else:  # attempt == 7
+                            log.warning("чанк %d: финальный — sleep 8 мин + повторный nuclear + ретрай 9/9", i)
+                            time.sleep(480)
+                            try:
+                                client.force_stop_session(uuid)
+                                time.sleep(5)
+                                client.unlock_blocked_sessions()
+                                time.sleep(3)
+                            except Exception as final_e:
+                                log.warning("final nuclear recovery упал: %s", final_e)
                 if _last_err is not None:
                     raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {_last_err}") from _last_err
                 ok = wait_for_warmup_done(client, uuid, cfg)
