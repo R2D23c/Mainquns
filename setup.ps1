@@ -209,6 +209,21 @@ if (Test-Path $lsFolder) {
     Write-Host "  [WARN] $lsFolder not found -- firewall preauth skipped" -ForegroundColor Yellow
 }
 
+# 4.6 Disable Windows Update auto-reboot — критично для VPS которые
+# Windows Update прерывал посреди цикла прогрева (наблюдалось 8 июня
+# на 3 из 6 машин: KB5066790 + KB5066791 + KB5066130 installed →
+# svchost.exe "Service pack (Planned)" reboot → потеря состояния цикла).
+# Updates всё равно качаются и устанавливаются — НО reboot откладывается
+# пока залогинен Administrator (а он залогинен пока есть RDP-сессия
+# в Active или Disconnected состоянии; только manual "Sign Out" её снимает).
+# Работает на Win 10 / Win 11 / Server 2016+ единообразно.
+Write-Step "Disabling Windows Update auto-reboot (NoAutoRebootWithLoggedOnUsers)"
+$wuKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+if (-not (Test-Path $wuKey)) { New-Item -Path $wuKey -Force | Out-Null }
+Set-ItemProperty -Path $wuKey -Name "NoAutoRebootWithLoggedOnUsers" -Value 1 -Type DWord -Force
+Set-ItemProperty -Path $wuKey -Name "AlwaysAutoRebootAtScheduledTime" -Value 0 -Type DWord -Force
+Write-Host "  [OK] auto-reboot blocked while user is logged in (security patches still install)" -ForegroundColor Green
+
 # 5. schedule_hourly.bat - register the Task Scheduler job
 Write-Step "Registering Task Scheduler job"
 cmd /c "schedule_hourly.bat"
