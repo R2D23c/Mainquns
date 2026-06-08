@@ -44,11 +44,19 @@ if exist "%~dp0cookies_export\"  rmdir /s /q "%~dp0cookies_export\"
 if exist "%~dp0warmup.log"       del /q "%~dp0warmup.log"
 if exist "%~dp0warmup_api.log"   del /q "%~dp0warmup_api.log"
 
-echo [fresh] re-enabling scheduled task...
-schtasks /change /tn LinkenSphereWarmup /enable >nul 2>&1
+echo [fresh] deleting old scheduled task (if exists)...
+REM Полное уничтожение существующего LinkenSphereWarmup. Безопасно даже
+REM если его нет — /f подавляет "не найдено" в return code, 2>nul глушит
+REM stdout/stderr. Это убирает любые leftover-состояния (stale principal,
+REM trigger time из прошлого, action указывающий на устаревший путь и
+REM т.п.) которые могли конфликтовать со свежим прогоном.
+schtasks /delete /tn LinkenSphereWarmup /f >nul 2>&1
 
-echo [fresh] triggering warmup NOW...
-schtasks /run /tn LinkenSphereWarmup
+echo [fresh] registering FRESH scheduled task (auto-triggers in 15s)...
+REM schedule_hourly.ps1 умеет это полностью: Unregister + Register-Force +
+REM first trigger через 15с + RepetitionInterval 45 мин. После этого
+REM schtasks /run не нужен — fresh trigger сам сработает.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0schedule_hourly.ps1"
 
 echo.
 echo [fresh] done. UI flow starts within seconds.
