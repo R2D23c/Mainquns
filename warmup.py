@@ -603,25 +603,30 @@ def _send_unicode_to_focused(text: str) -> bool:
 
 
 def _type_via_clipboard(text: str) -> None:
-    """Вводит текст в текущий focused input.
+    """Вводит текст в текущий focused input через SendInput Unicode.
 
-    Главный путь — SendInput с KEYEVENTF_UNICODE: символы летят как
-    Unicode-коды напрямую, нет Ctrl+V (не надо, чтобы шорткат докатился
-    до Electron-input'а), нет зависимости от клавиатурной раскладки.
+    Имя функции — историческое; clipboard БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ.
 
-    Параллельно кладём текст и в clipboard — как safety net: если
-    SendInput тоже промахнулся (поле не в фокусе), юзер сможет
-    руками кликнуть в input и Ctrl+V. Данные уже в буфере."""
+    Каждый символ летит как Unicode-код напрямую через Win32 SendInput
+    в focused window: никакого Ctrl+V, нет зависимости от клавиатурной
+    раскладки, нет зависимости от содержимого clipboard'а.
+
+    Раньше параллельно писали текст в clipboard как safety net для
+    ручного Ctrl+V — но наш pipeline unattended (оператор не сидит у
+    экрана с пальцем на Ctrl+V), а clipboard sync в parallel mstsc
+    устраивал race между N одновременными UI install'ами и перетирал
+    локальный буфер оператора. Удалили — никакого регресса не вызвало
+    (на всех успешных машинах работал именно SendInput, не safety net).
+
+    Fallback на pyautogui.typewrite — тоже синтетические keystroke'и
+    через Win32, без clipboard. Срабатывает только если SendInput
+    отверг часть кодов (на практике не наблюдалось)."""
     if sys.platform != "win32":
         pyautogui.typewrite(text, interval=0.03)
         return
-    # safety net: clipboard
-    _set_clipboard_win32(text)
-    # главный путь: SendInput Unicode
     if _send_unicode_to_focused(text):
         time.sleep(0.3)
         return
-    # последний шанс: typewrite (зависит от раскладки, но лучше чем ничего)
     log.warning("SendInput Unicode failed → fallback typewrite")
     pyautogui.typewrite(text, interval=0.03)
     time.sleep(0.2)
