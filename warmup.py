@@ -142,8 +142,16 @@ def screenshot(step: str, enabled: bool) -> None:
     log.info("screenshot → %s", path.name)
 
 
-def grab_screen_bgr() -> np.ndarray:
-    img = np.array(ImageGrab.grab())
+def grab_screen_bgr() -> np.ndarray | None:
+    """Скриншот всего экрана как cv2 BGR-массив. Возвращает None если
+    ImageGrab упал OSError'ом — это происходит при отключённой RDP-сессии
+    (нет attached desktop'а → нечего скриншотить). Caller обязан обработать
+    None как «шаблон не найден» и продолжить polling."""
+    try:
+        img = np.array(ImageGrab.grab())
+    except OSError as e:
+        log.warning("grab_screen_bgr: %s — пропуск", e)
+        return None
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
@@ -160,6 +168,8 @@ def find_template(name: str, confidence: float) -> tuple[int, int] | None:
         return None
 
     screen = grab_screen_bgr()
+    if screen is None:
+        return None  # RDP отключена, screen grab упал → шаблон «не найден»
     res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
     log.info("match %s: confidence=%.3f", name, max_val)
@@ -839,7 +849,15 @@ def _match_template_in_region(
     region_h = bottom - top
     if region_w <= 0 or region_h <= 0:
         return None
-    img = ImageGrab.grab(bbox=(left, top, right, bottom))
+    try:
+        img = ImageGrab.grab(bbox=(left, top, right, bottom))
+    except OSError as e:
+        # RDP отключена → нет attached desktop'а → ImageGrab падает.
+        # Возвращаем None как «шаблон не найден» — caller (poll-loop)
+        # перевызовет нас в следующей итерации и при reconnect RDP
+        # template-matching возобновится без перезапуска warmup.py.
+        log.warning("_match_template_in_region(%s): %s — пропуск", name, e)
+        return None
     region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
     best_val = 0.0
