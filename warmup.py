@@ -891,8 +891,10 @@ def _click_allow_access_template() -> bool:
     экране. Версии Windows отличаются — кнопка может называться
     'Allow access' (со щитом UAC) или просто 'Allow' (Win11-style).
     Перебирает шаблоны по очереди:
-      - allow_access   — Win10 стиль с щитом
-      - allow_access2  — Win11 стиль без щита
+      - allow_access   — Win10 стиль (с щитом UAC, текст "Allow access")
+      - allow_access2  — Win11 21H2/22H2 стиль (без щита, текст "Allow access")
+      - allow_access3  — Win11/Server 2022 24H2+ minimal стиль (просто "Allow",
+                         без щита, без фона — встречается на свежих образах)
     Возвращает True если что-то кликнули."""
     if sys.platform != "win32":
         return False
@@ -901,7 +903,7 @@ def _click_allow_access_template() -> bool:
     screen_w = ctypes.windll.user32.GetSystemMetrics(0)
     screen_h = ctypes.windll.user32.GetSystemMetrics(1)
 
-    for tpl_name in ("allow_access", "allow_access2"):
+    for tpl_name in ("allow_access", "allow_access2", "allow_access3"):
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
             continue
         # Понижаем порог до 0.70 СПЕЦИАЛЬНО для allow-кнопок: шаблоны 180×53
