@@ -20,8 +20,21 @@ REM Does NOT touch:
 REM   credentials.ini, config.ini, templates\, urls\, requirements.txt.
 
 echo.
-echo [fresh] killing Linken Sphere processes...
+echo [fresh] killing Linken Sphere processes (+ embedded Chromium / Electron helpers)...
+REM Шаг 1: taskkill по имени с /T (kill children) — основной случай, ловит
+REM    Linken Sphere 2.exe + его прямых child процессов (renderer/gpu/utility).
 taskkill /F /IM "Linken Sphere 2.exe" /T >nul 2>&1
+
+REM Шаг 2: PowerShell-добивка по install path. Ловит то что таскил пропустил:
+REM    - detached Chromium subprocess (Electron спавнит renderer/gpu
+REM      которые иногда отвязываются от parent'а)
+REM    - helper exe внутри LS folder (Squirrel updater, обновлятель)
+REM    - зомби-процессы без parent'а (после кривого exit'а warmup'а)
+REM    SilentlyContinue потому что если ничего не нашлось — это норма.
+powershell -NoProfile -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like 'C:\Program Files (x86)\Linken Sphere 2\*' } catch { $false } } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1
+
+REM Шаг 3: пауза на flush — LS пишет последний state на диск (~2с)
+timeout /t 2 /nobreak >nul 2>&1
 
 echo [fresh] cleaning warmup state...
 if exist "%~dp0.session_name"     del /q "%~dp0.session_name"
