@@ -1007,6 +1007,8 @@ def _dismiss_customize_wizard_step() -> bool:
       - get_started     — последняя страница wizard ('Get Started >')
       - get_started2    — приветственный экран после логина
                           ('Welcome to Linken Sphere 2', другой фон)
+      - get_started2_v2 — та же кнопка, но в новой версии LS (шрифт/рамка
+                          рендерятся иначе, старый шаблон даёт ~0.79)
       - skip            — иногда всплывающее окно с малозаметной кнопкой SKIP
       - close_x         — финальный мелкий крестик ✕ на следующем после skip окне;
                           ищется ТОЛЬКО в течение 30с после клика на skip,
@@ -1034,11 +1036,14 @@ def _dismiss_customize_wizard_step() -> bool:
     lower_half_top = rect.top + h // 2
 
     # (имя шаблона, top границы поиска, confidence)
+    # get_started2_v2 — вариант кнопки welcome-экрана для новой версии LS
+    # (другое сглаживание шрифта/рамки даёт ~0.79 со старым шаблоном).
     candidates = [
-        ("next_step",    lower_half_top, 0.80),
-        ("get_started",  lower_half_top, 0.80),
-        ("get_started2", lower_half_top, 0.80),
-        ("skip",         rect.top,       0.85),
+        ("next_step",       lower_half_top, 0.80),
+        ("get_started",     lower_half_top, 0.80),
+        ("get_started2",    lower_half_top, 0.80),
+        ("get_started2_v2", lower_half_top, 0.80),
+        ("skip",            rect.top,       0.85),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
