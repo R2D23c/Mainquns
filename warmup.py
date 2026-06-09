@@ -1043,7 +1043,7 @@ def _dismiss_customize_wizard_step() -> bool:
         ("get_started",     lower_half_top, 0.80),
         ("get_started2",    lower_half_top, 0.80),
         ("get_started2_v2", lower_half_top, 0.80),
-        ("skip",            rect.top,       0.85),
+        ("skip",            rect.top,       0.80),
     ]
     # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
