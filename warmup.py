@@ -1082,6 +1082,41 @@ def _dismiss_customize_wizard_step() -> bool:
     return False
 
 
+def _enable_autologin_toggle(rect_top: int, rect_left: int,
+                             rect_right: int, rect_bottom: int,
+                             confidence: float) -> bool:
+    """Кликает по Autologin toggle в форме логина LS, если он в OFF-состоянии.
+    Шаблон templates/autologin_toggle.png — это OFF (тёмная плашка, белый
+    кружок слева). Если match не находится — toggle уже включён (или версия
+    LS без toggle), не трогаем, чтобы случайно не выключить уже включённый.
+
+    Включённый toggle = LS закэширует credentials → после reboot и Startup
+    folder relaunch LS залогинится сама без участия warmup.py UI."""
+    if sys.platform != "win32":
+        return False
+    if not (TEMPLATES_DIR / "autologin_toggle.png").exists():
+        log.info("autologin_toggle.png отсутствует — шаг пропущен")
+        return False
+    # Toggle сидит между password (52%) и SIGN IN (68%), типично на ~58-62%
+    # высоты окна. Захватываем чуть шире чтобы быть устойчивым к разным
+    # версиям LS-формы.
+    h = rect_bottom - rect_top
+    search_top    = rect_top + int(h * 0.50)
+    search_bottom = rect_top + int(h * 0.72)
+    pt = _match_template_in_region(
+        "autologin_toggle", confidence,
+        rect_left, search_top, rect_right, search_bottom,
+    )
+    if pt is None:
+        log.info("autologin_toggle (OFF) не найден — вероятно уже ON, пропуск")
+        return False
+    log.info("autologin_toggle (OFF) найден @(%d,%d) — кликаю чтобы включить", *pt)
+    _record_click(pt[0], pt[1], "autologin_toggle")
+    pyautogui.click(pt[0], pt[1])
+    time.sleep(0.5)
+    return True
+
+
 def _find_auth_window() -> int:
     """Ищет окно Linken Sphere 2 с формой входа. Разворачивает если свёрнуто.
     Пропускает мелкие/служебные окна Electron с тем же заголовком."""
@@ -1199,6 +1234,12 @@ def login_if_needed(cfg: configparser.ConfigParser) -> None:
     time.sleep(0.3)
     pyautogui.hotkey("ctrl", "a")
     _type_via_clipboard(creds.get("account", "password"))
+
+    # Включаем Autologin toggle ДО нажатия SIGN IN. Если уже включён —
+    # шаблон не найдётся и шаг тихо пропускается (safety: не выключаем
+    # уже включённый). При следующем reboot LS поднимется через Startup
+    # folder и сама залогинится из кэша.
+    _enable_autologin_toggle(rect.top, rect.left, rect.right, rect.bottom, conf)
 
     screenshot("login_filled", cfg.getboolean("logging", "screenshots"))
 
