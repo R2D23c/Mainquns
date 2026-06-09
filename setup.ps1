@@ -1,14 +1,21 @@
 # setup.ps1 - bootstrap for fresh Windows VPS for Linken Sphere warmup.
 #
 # Run from PowerShell as Admin on Windows 10/11/Server 2019+:
+#   $env:LS_EMAIL = "..."
+#   $env:LS_PASSWORD = "..."
+#   $env:WINDOWS_ADMIN_PASSWORD = "..."   # optional, enables auto-recovery
 #   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/main/setup.ps1 | iex
 #
 # What it does:
 #   - check/install Git and Python 3.12 (via winget; falls back to direct
 #     installer downloads from github/python.org if winget unavailable on VPS)
 #   - git clone repo to C:\warmup
-#   - run install.bat (Python deps + Linken Sphere + credentials.ini)
-#   - register task in Task Scheduler
+#   - install.bat: Python deps + Linken Sphere + credentials.ini
+#   - 4.5 firewall pre-authorize LS binaries (no Defender popups mid-cycle)
+#   - 4.6 Windows Update — disable auto-reboot (preventive)
+#   - 4.7 AutoAdminLogon (enables auto-recovery after any reboot)
+#   - 4.8 Startup folder shortcut → ls_launch.bat (auto-launch LS on logon)
+#   - register Task Scheduler job (every 45 min)
 
 $ErrorActionPreference = 'Stop'
 
@@ -224,45 +231,35 @@ Set-ItemProperty -Path $wuKey -Name "NoAutoRebootWithLoggedOnUsers" -Value 1 -Ty
 Set-ItemProperty -Path $wuKey -Name "AlwaysAutoRebootAtScheduledTime" -Value 0 -Type DWord -Force
 Write-Host "  [OK] auto-reboot blocked while user is logged in (security patches still install)" -ForegroundColor Green
 
-# 4.7 Auto-login Administrator + 24h cleanup task.
+# 4.7 AutoAdminLogon — БЕССРОЧНЫЙ автологин текущего user'а после reboot.
 # Включается ТОЛЬКО если оператор передал $env:WINDOWS_ADMIN_PASSWORD.
-# Назначение: пережить host-level reboot (Kernel-Power 41 от провайдера/
-# hypervisor maintenance) без необходимости ручного RDP. После такого ребута
-# Windows сама залогинит Administrator → user session есть → Task Scheduler
-# Interactive task работает → LS Run reg key триггерится (Step 4.8) →
-# pipeline продолжается сам.
+# Назначение: пережить любой reboot (Windows Update / Kernel-Power 41 от
+# провайдера) без ручного RDP. После reboot Windows сама залогинит user →
+# user session есть → Task Scheduler Interactive работает → Startup folder
+# триггерится → LS поднимается (Step 4.8) → pipeline идёт сам.
+#
+# DefaultUserName/DefaultDomainName берутся из текущей сессии ($env:USERNAME
+# и $env:COMPUTERNAME). Это критично: на части VPS user не 'Administrator'
+# а просто 'Admin' (или другое имя), и hardcoded значение ломает autologin.
+#
+# AutoLogonCount намеренно удаляется чтобы autologin был БЕССРОЧНЫМ. Иначе
+# он самоотключается через N reboot'ов и recovery после второго+ ребута
+# не сработает.
 #
 # Безопасность:
-#   - DefaultPassword хранится REG_SZ в plaintext в Winlogon.
-#     Локально на VPS, наружу не уходит. Прочитать может только admin
-#     (который и так имеет полные права).
-#   - Через 24 часа специальный scheduled task ('AutoLoginCleanup')
-#     удаляет DefaultPassword и выставляет AutoAdminLogon=0. После этого
-#     VPS перестаёт автологиниться — если кто-то ребутнет, нужен ручной
-#     RDP, что в нашем случае ОК: к 24h пайплайн уже отдал cookies в
-#     ntfy/Telegram, оператор забирает файл и сносит VPS.
-#
-# Если оператор НЕ передал WINDOWS_ADMIN_PASSWORD — этот шаг тихо
-# пропускается. Pipeline всё равно работает, но после host-reboot
-# потребуется ручной RDP чтобы поднять user session + LS.
+#   - DefaultPassword хранится REG_SZ в plaintext в Winlogon. Локально на VPS,
+#     наружу не уходит. Прочитать может только admin (он и так имеет полные
+#     права). Если боишься — не задавай WINDOWS_ADMIN_PASSWORD; pipeline всё
+#     равно будет работать, просто после ребута потребуется ручной RDP.
 if ($env:WINDOWS_ADMIN_PASSWORD) {
-    Write-Step "Configuring Administrator auto-login (24h self-cleanup)"
+    Write-Step "Configuring AutoAdminLogon (permanent, until WINDOWS_ADMIN_PASSWORD unset)"
     $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-    Set-ItemProperty -Path $winlogon -Name "AutoAdminLogon"  -Value "1"
-    Set-ItemProperty -Path $winlogon -Name "DefaultUserName" -Value "Administrator"
-    Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $env:WINDOWS_ADMIN_PASSWORD
-    Write-Host "  [OK] AutoAdminLogon=1, DefaultUserName=Administrator" -ForegroundColor Green
-
-    # Регистрируем задачу самоуничтожения через 24 часа
-    $cleanupTime = (Get-Date).AddHours(24)
-    $cleanupCmd = "Remove-ItemProperty -Path '$winlogon' -Name DefaultPassword -ErrorAction SilentlyContinue; " +
-                  "Set-ItemProperty -Path '$winlogon' -Name AutoAdminLogon -Value '0'; " +
-                  "schtasks /delete /tn AutoLoginCleanup /f"
-    $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -Command `"$cleanupCmd`""
-    $trigger = New-ScheduledTaskTrigger -Once -At $cleanupTime
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-    Register-ScheduledTask -TaskName "AutoLoginCleanup" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-    Write-Host "  [OK] AutoLoginCleanup scheduled for $($cleanupTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Green
+    Set-ItemProperty -Path $winlogon -Name "AutoAdminLogon"    -Value "1"
+    Set-ItemProperty -Path $winlogon -Name "DefaultUserName"   -Value $env:USERNAME
+    Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME
+    Set-ItemProperty -Path $winlogon -Name "DefaultPassword"   -Value $env:WINDOWS_ADMIN_PASSWORD
+    Remove-ItemProperty -Path $winlogon -Name "AutoLogonCount" -ErrorAction SilentlyContinue
+    Write-Host "  [OK] AutoAdminLogon = $env:COMPUTERNAME\$env:USERNAME (no expiry)" -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "[setup] WINDOWS_ADMIN_PASSWORD not set -- auto-login skipped" -ForegroundColor Yellow
@@ -270,6 +267,33 @@ if ($env:WINDOWS_ADMIN_PASSWORD) {
     Write-Host "        manual RDP will be required to resume pipeline." -ForegroundColor Yellow
     Write-Host "        To enable auto-login: re-run setup.ps1 with" -ForegroundColor Yellow
     Write-Host "        `$env:WINDOWS_ADMIN_PASSWORD = '<your VPS admin password>'" -ForegroundColor Yellow
+}
+
+# 4.8 Startup folder shortcut → ls_launch.bat wrapper.
+# Когда любая user-сессия открывается (autologin после ребута ИЛИ ручной RDP),
+# Windows триггерит Startup folder. Наш ярлык запускает ls_launch.bat — он
+# сначала проверяет нет ли уже запущенной LS, и только тогда запускает.
+# Защита от двойного инстанса при RDP logon на Windows Server (создаёт новую
+# session — Startup folder выстреливает повторно, и без проверки получили бы
+# 'already running' alert от второго LS).
+Write-Step "Configuring LS auto-launch (Startup folder + ls_launch.bat wrapper)"
+$wrapperPath = Join-Path $repoDir "ls_launch.bat"
+if (-not (Test-Path $wrapperPath)) {
+    Write-Host "  [WARN] $wrapperPath not found in repo -- shortcut not created" -ForegroundColor Yellow
+} else {
+    $startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+    if (-not (Test-Path $startupFolder)) {
+        New-Item -Path $startupFolder -ItemType Directory -Force | Out-Null
+    }
+    $shortcutPath = Join-Path $startupFolder "LinkenSphere2.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($shortcutPath)
+    $sc.TargetPath = $wrapperPath
+    $sc.WorkingDirectory = $repoDir
+    # WindowStyle = 7 (Minimized): при logon чёрное окно cmd не мигает поверх.
+    $sc.WindowStyle = 7
+    $sc.Save()
+    Write-Host "  [OK] Startup shortcut: $shortcutPath -> ls_launch.bat" -ForegroundColor Green
 }
 
 # 5. schedule_hourly.bat - register the Task Scheduler job
