@@ -34,6 +34,7 @@ if exist "%~dp0.warmup_started_at" del /q "%~dp0.warmup_started_at"
 if exist "%~dp0.notified_done"    del /q "%~dp0.notified_done"
 if exist "%~dp0.first_start"      del /q "%~dp0.first_start"
 if exist "%~dp0.wizard_dismissed" del /q "%~dp0.wizard_dismissed"
+if exist "%~dp0.watchdog_fail_count" del /q "%~dp0.watchdog_fail_count"
 
 for /f "delims=" %%f in ('dir /b /a-d "%~dp0session_imports\CL-*.xlsx" 2^>nul') do (
     del /q "%~dp0session_imports\%%f"
@@ -43,14 +44,16 @@ if exist "%~dp0screenshots\"     rmdir /s /q "%~dp0screenshots\"
 if exist "%~dp0cookies_export\"  rmdir /s /q "%~dp0cookies_export\"
 if exist "%~dp0warmup.log"       del /q "%~dp0warmup.log"
 if exist "%~dp0warmup_api.log"   del /q "%~dp0warmup_api.log"
+if exist "%~dp0watchdog.log"     del /q "%~dp0watchdog.log"
 
-echo [fresh] deleting old scheduled task (if exists)...
-REM Полное уничтожение существующего LinkenSphereWarmup. Безопасно даже
-REM если его нет — /f подавляет "не найдено" в return code, 2>nul глушит
+echo [fresh] deleting old scheduled tasks (if exists)...
+REM Полное уничтожение существующих LinkenSphereWarmup и LsWatchdog. Безопасно
+REM даже если их нет — /f подавляет "не найдено" в return code, 2>nul глушит
 REM stdout/stderr. Это убирает любые leftover-состояния (stale principal,
 REM trigger time из прошлого, action указывающий на устаревший путь и
 REM т.п.) которые могли конфликтовать со свежим прогоном.
 schtasks /delete /tn LinkenSphereWarmup /f >nul 2>&1
+schtasks /delete /tn LsWatchdog /f >nul 2>&1
 
 echo [fresh] registering FRESH scheduled task (auto-triggers in 15s)...
 REM schedule_hourly.ps1 умеет это полностью: Unregister + Register-Force +

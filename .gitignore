@@ -21,3 +21,8 @@ cookies_export/
 .warmup_started_at
 .wizard_dismissed
 .wizards_done
+.watchdog_fail_count
+watchdog.log
+.last_boot
+notify_boot.log
+ls_launch.log
