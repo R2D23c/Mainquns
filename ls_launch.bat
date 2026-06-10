@@ -39,6 +39,13 @@ if not exist "%LS%" (
     exit /b 1
 )
 
-start "" "%LS%"
->> "%~dp0ls_launch.log" echo [%DATE% %TIME%] launched %LS%
+REM /D <install dir> — LS требует working directory = своя install dir,
+REM иначе её Electron не успевает зарегистрировать кастомный evo:// protocol
+REM в Chromium-renderer'е, и первое окно показывает 'Page failed to load.
+REM URL: evo://gui/index.html?... ERR_UNKNOWN_URL_SCHEME (-302)'.
+REM Без /D start наследует cwd родителя (=C:\warmup из Startup folder
+REM shortcut WorkingDirectory) — LS работает по-другому.
+for %%i in ("%LS%") do set "LSDIR=%%~dpi"
+start "" /D "%LSDIR%" "%LS%"
+>> "%~dp0ls_launch.log" echo [%DATE% %TIME%] launched %LS% (cwd=%LSDIR%)
 endlocal
