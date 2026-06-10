@@ -16,9 +16,14 @@
 
 Кейс с reset на стороне провайдера (Kernel-Power 41) покрывается: после
 boot'а ls_launch.bat дёрнет этот скрипт, boot time изменится — пуш уйдёт.
+
+Логирование:
+  Каждый запуск дописывает строку в notify_boot.log (timestamp + outcome).
+  Это нужно для пост-факт-диагностики: когда оператор замечает что 🔄 не
+  пришло, можно посмотреть в лог и увидеть в каком звене застряло
+  (skip-first / skip-same-boot / sent / failed-ntfy / failed-no-boot).
 """
 
-import configparser
 import datetime
 import json
 import socket
@@ -30,6 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 LAST_BOOT_FILE = ROOT / ".last_boot"
+LOG_FILE = ROOT / "notify_boot.log"
 
 # Топик ntfy — тот же что в warmup_api.py (источник единой правды этого
 # скрипта намеренно изолирован, чтобы notify_boot не импортил warmup_api
@@ -40,6 +46,19 @@ NTFY_URL = "https://ntfy.sh"
 # Не блокируем boot — короткий timeout. Если сети нет (не успела подняться)
 # — тихо пропускаем. Следующий warmup_api цикл всё равно сообщит о статусе.
 HTTP_TIMEOUT = 15
+
+
+def _log(outcome: str, **kwargs: object) -> None:
+    """Append a single-line entry to notify_boot.log.
+    Формат: [YYYY-MM-DD HH:MM:SS] outcome  key1=val1 key2=val2 ..."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        extras = " ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
+        line = f"[{ts}] {outcome:<16}  {extras}\n"
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 def _powershell_boot_filetime() -> str | None:
@@ -100,8 +119,8 @@ def _load_session_name() -> str:
     return "<unknown>"
 
 
-def _send_ntfy(uptime_min: int) -> bool:
-    """Шлёт push на ntfy.sh. Возвращает True если ответ 2xx."""
+def _send_ntfy(uptime_min: int) -> tuple[bool, str]:
+    """Шлёт push на ntfy.sh. Возвращает (ok, err_msg). err_msg пустой если ok."""
     sess = _load_session_name()
     machine = _machine_id()
     body = (
@@ -126,44 +145,55 @@ def _send_ntfy(uptime_min: int) -> bool:
         )
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             resp.read()
-            return 200 <= resp.status < 300
-    except Exception:
-        return False
+            ok = 200 <= resp.status < 300
+            return ok, ("" if ok else f"HTTP {resp.status}")
+    except Exception as e:
+        return False, repr(e)
 
 
 def main() -> int:
     if sys.platform != "win32":
+        _log("skip-not-win32")
         return 0
 
     current_boot = _powershell_boot_filetime()
     if not current_boot:
+        _log("failed-no-boot", err="PowerShell не вернул FileTime")
         return 0
 
     last_boot: str | None = None
     if LAST_BOOT_FILE.exists():
         try:
             last_boot = LAST_BOOT_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
+        except Exception as e:
+            _log("warn-read-last-boot", err=repr(e))
             last_boot = None
 
     # Обновляем файл ПЕРЕД отправкой ntfy, чтобы при сетевом сбое не было
     # ретраев в следующем logon в той же boot-сессии (анти-спам).
     try:
         LAST_BOOT_FILE.write_text(current_boot, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        _log("warn-write-last-boot", err=repr(e))
 
     if last_boot is None:
         # Первый запуск ever — initial install, не recovery. Не шлём.
+        _log("skip-first", current=current_boot)
         return 0
 
     if last_boot == current_boot:
         # Тот же boot — relogin внутри сессии (RDP reconnect на Server).
+        _log("skip-same-boot", current=current_boot)
         return 0
 
     # Свежий boot после ребута → пуш. Ждём 5с чтобы сеть успела подняться.
     time.sleep(5)
-    _send_ntfy(_uptime_minutes(current_boot))
+    uptime = _uptime_minutes(current_boot)
+    ok, err = _send_ntfy(uptime)
+    if ok:
+        _log("sent", boot=current_boot, prev=last_boot, uptime=f"{uptime}m")
+    else:
+        _log("failed-ntfy", boot=current_boot, uptime=f"{uptime}m", err=err)
     return 0
 
 
