@@ -13,14 +13,17 @@ REM      (через start, без блокировки родительског
 setlocal
 
 REM Boot detection в background — не задерживаем LS launch.
-REM .python_cmd содержит абсолютный путь к py.exe (пишется install.bat).
-REM Если файла нет — пробуем `python` из PATH; если и его нет — silent skip.
+REM .python_cmd содержит абсолютный путь к py.exe (install.bat пишет его УЖЕ
+REM В КАВЫЧКАХ: "C:\Program Files\Python312\python.exe"). Поэтому %PY%
+REM разворачивается уже закавыченным — НЕ оборачиваем повторно, иначе cmd
+REM видит ""C:\Program и спотыкается на пробеле ('Windows cannot find
+REM C:\Program' popup). Если .python_cmd нет — PY=python (без кавычек, OK).
 set "PY=python"
 if exist "%~dp0.python_cmd" (
     set /p PY=<"%~dp0.python_cmd"
 )
 if exist "%~dp0notify_boot.py" (
-    start "" /B "%PY%" "%~dp0notify_boot.py" >nul 2>&1
+    start "" /B %PY% "%~dp0notify_boot.py" >nul 2>&1
 )
 
 tasklist /FI "IMAGENAME eq Linken Sphere 2.exe" 2>nul | find /I "Linken Sphere 2.exe" >nul
