@@ -13,8 +13,10 @@
 #   - install.bat: Python deps + Linken Sphere + credentials.ini
 #   - 4.5 firewall pre-authorize LS binaries (no Defender popups mid-cycle)
 #   - 4.6 Windows Update — disable auto-reboot (preventive)
+#   - 4.6.5 account lockout policy off (anti-lockout after hard reset)
 #   - 4.7 AutoAdminLogon (enables auto-recovery after any reboot)
-#   - 4.8 Startup folder shortcut → ls_launch.bat (auto-launch LS on logon)
+#   - 4.8 Startup folder shortcut → ls_launch.bat (auto-launch LS on logon,
+#         + boot detection → 🔄 ntfy push после Kernel-Power 41)
 #   - register Task Scheduler job (every 45 min)
 
 $ErrorActionPreference = 'Stop'
@@ -230,6 +232,25 @@ if (-not (Test-Path $wuKey)) { New-Item -Path $wuKey -Force | Out-Null }
 Set-ItemProperty -Path $wuKey -Name "NoAutoRebootWithLoggedOnUsers" -Value 1 -Type DWord -Force
 Set-ItemProperty -Path $wuKey -Name "AlwaysAutoRebootAtScheduledTime" -Value 0 -Type DWord -Force
 Write-Host "  [OK] auto-reboot blocked while user is logged in (security patches still install)" -ForegroundColor Green
+
+# 4.6.5 Disable account lockout policy.
+# Если hard reset (Kernel-Power 41 / провайдерский reset) случится в момент
+# когда registry transaction для DefaultPassword не успел flushed на диск,
+# AutoAdminLogon может пытаться с битым паролем. По умолчанию Windows
+# Server лочит аккаунт после ~10 failed attempts → даже корректный RDP
+# login потом не пускает. Случилось ровно это с 155.138.253.219.
+# net accounts /lockoutthreshold:0 — полностью отключает lockout policy.
+# Аккаунт никогда не залочится, даже при 1000 failed attempts.
+# Это не security-проблема для нашего сценария: VPS одноразовые, snapshot
+# делается сразу после warmup, и доступ только через RDP по нашему паролю.
+Write-Step "Disabling account lockout policy (anti-lockout after hard reset)"
+$lockoutOut = cmd /c "net accounts /lockoutthreshold:0" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  [OK] account lockout threshold = 0 (никогда не лочится)" -ForegroundColor Green
+} else {
+    Write-Host "  [WARN] net accounts вернул rc=$LASTEXITCODE :" -ForegroundColor Yellow
+    Write-Host "  $lockoutOut" -ForegroundColor Yellow
+}
 
 # 4.7 AutoAdminLogon — БЕССРОЧНЫЙ автологин текущего user'а после reboot.
 # Включается ТОЛЬКО если оператор передал $env:WINDOWS_ADMIN_PASSWORD.
