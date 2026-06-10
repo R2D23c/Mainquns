@@ -23,9 +23,26 @@ $action = New-ScheduledTaskAction `
 # variance (медленный VPS, лагающие страницы). НЕ ставим 40 мин: при
 # MultipleInstances=IgnoreNew любой цикл >40 мин съедает следующий
 # триггер и эффективный интервал удваивается до 80 мин.
-$trigger = New-ScheduledTaskTrigger `
+$timeTrigger = New-ScheduledTaskTrigger `
     -Once -At (Get-Date).AddSeconds(15) `
     -RepetitionInterval (New-TimeSpan -Minutes 45)
+
+# Дополнительный триггер на boot — страховка против известной проблемы
+# Windows Task Scheduler: при UseUnifiedSchedulingEngine=True + Once +
+# RepetitionInterval после reboot, расписание иногда "забывается" и
+# следующий tick откладывается на 2-3 часа вместо положенных 45 мин.
+# Наблюдалось эмпирически: после reboot в 02:35 ожидаемые тики в 03:02
+# и 03:47 не сработали (NumberOfMissedRuns=3), потребовался ручной
+# schtasks /run. AtStartup гарантирует что после ЛЮБОГО boot задача
+# гарантированно дёргается в течение ~1 минуты после старта системы.
+# MultipleInstances=IgnoreNew защищает от дублирования если AtStartup
+# совпадает с RepetitionInterval boundary.
+$bootTrigger = New-ScheduledTaskTrigger -AtStartup
+# Маленькая задержка чтобы LS (запущенная из Startup folder) успела
+# инициализировать API на 36555 до того как warmup_api её опросит.
+$bootTrigger.Delay = "PT2M"
+
+$trigger = @($timeTrigger, $bootTrigger)
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -50,6 +67,7 @@ Register-ScheduledTask `
 Write-Host ""
 Write-Host "[OK] Task '$TaskName' registered."
 Write-Host " - First trigger in 15 seconds, then every 45 minutes."
+Write-Host " - PLUS: AtStartup trigger (fires within 1-2 min after every boot)."
 Write-Host " - Calls run_api.bat. Internal logic:"
 Write-Host "     first run (no flags) -> warmup.py (UI install:"
 Write-Host "                              login, API port, session import)"
