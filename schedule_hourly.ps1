@@ -73,13 +73,26 @@ Register-ScheduledTask `
 # ============================================================================
 $WatchdogTaskName = 'LsWatchdog'
 $watchdogCmd = Join-Path $ScriptDir 'run_watchdog.bat'
+$hiddenVbs = Join-Path $ScriptDir 'run_hidden.vbs'
 if (Test-Path $watchdogCmd) {
     Unregister-ScheduledTask -TaskName $WatchdogTaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 
-    $wdAction = New-ScheduledTaskAction `
-        -Execute 'cmd.exe' `
-        -Argument "/c `"$watchdogCmd`"" `
-        -WorkingDirectory $ScriptDir
+    # Watchdog запускается каждые 5 мин — если открывать видимый cmd на каждом
+    # tick, оператор видит мерцающие чёрные окна. Особенно плохо во время
+    # warmup.py UI install: cmd может перехватить focus или визуально
+    # перекрыть LS. Поэтому wscript.exe + run_hidden.vbs: запуск полностью
+    # невидимый. Если VBS файла нет (старая установка) — fallback на cmd.
+    if (Test-Path $hiddenVbs) {
+        $wdAction = New-ScheduledTaskAction `
+            -Execute 'wscript.exe' `
+            -Argument "`"$hiddenVbs`" `"$watchdogCmd`"" `
+            -WorkingDirectory $ScriptDir
+    } else {
+        $wdAction = New-ScheduledTaskAction `
+            -Execute 'cmd.exe' `
+            -Argument "/c `"$watchdogCmd`"" `
+            -WorkingDirectory $ScriptDir
+    }
 
     # Каждые 5 минут — частая проверка дёшево (Python startup + HTTP ping = <2с).
     # Первый tick через 3 мин после регистрации чтобы дать install.bat закончиться.

@@ -1116,9 +1116,14 @@ def run() -> int:
 
         # Firewall watcher на ВСЁ время прогрева (все чанки + паузы).
         import subprocess
+        # CREATE_NO_WINDOW: python.exe для _firewall_watcher запускается БЕЗ
+        # видимого console window. Раньше без флага мог мерцать чёрный квадрат
+        # на каждом polling (15 сек) — мешало pyautogui clicks в UI flow.
+        _no_window = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         fw_proc = subprocess.Popen(
             [sys.executable, str(ROOT / "_firewall_watcher.py"), "15"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_no_window,
         )
         # Анти-collision jitter: на крупных парках (5+ VPS на одном
         # LS-аккаунте) машины часто синхронизируются по времени —

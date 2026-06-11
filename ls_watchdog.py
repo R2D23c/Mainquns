@@ -194,10 +194,15 @@ def _restart_ls() -> bool:
         return False
 
     try:
+        # CREATE_NO_WINDOW: cmd выполняется БЕЗ visible window. Раньше был
+        # DETACHED_PROCESS, который не всегда скрывает cmd на Windows (создаёт
+        # invisible-ish console но иногда мерцает). CREATE_NO_WINDOW гарантирует
+        # полную невидимость. Cmd /c заканчивается после `start "" /D ... LS`
+        # внутри ls_launch.bat — LS-процесс независимый, переживёт parent.
         subprocess.Popen(
             ["cmd", "/c", str(LAUNCH_BAT)],
             cwd=str(ROOT),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return True
     except Exception as e:
@@ -241,13 +246,31 @@ def _check_and_unstick_main_task() -> None:
     _log(f"force-trigger: {'OK' if ok else 'FAILED'}")
 
 
+def _self_disable() -> None:
+    """schtasks /change /disable /tn LsWatchdog — выключаем сами себя.
+    Зовётся когда .notified_done существует. После этого Task Scheduler
+    не дёргает watchdog → больше нет 5-минутных popup'ов на VPS."""
+    try:
+        subprocess.run(
+            ["schtasks", "/change", "/disable", "/tn", "LsWatchdog"],
+            capture_output=True, text=True, timeout=10, errors="replace",
+        )
+        _log("self-disable: pipeline done — LsWatchdog disabled, больше popup не будет")
+    except Exception as e:
+        _log(f"self-disable failed: {e!r}")
+
+
 def main() -> int:
     if sys.platform != "win32":
         return 0
 
     if NOTIFIED_DONE.exists():
-        # Pipeline завершён — LS не нужна, watchdog отдыхает.
+        # Pipeline завершён — LS не нужна, watchdog отдыхает И отключаем
+        # сам Task Scheduler entry чтобы прекратить мерцание cmd-окон
+        # каждые 5 мин. Идемпотентно: если уже disabled, schtasks
+        # промолчит, _log() напишет ещё одну строку (это OK).
         _write_counter(0)
+        _self_disable()
         return 0
 
     if _main_task_running():
