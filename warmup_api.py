@@ -143,7 +143,7 @@ def load_session_name() -> str:
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
 # подставляет эмодзи из ntfy-тегов, поэтому кладём их прямо в заголовок.
 _TAG_EMOJI = {"white_check_mark": "✅", "tada": "🎉", "warning": "⚠️",
-              "hourglass_flowing_sand": "⏳", "gear": "⚙️"}
+              "hourglass_flowing_sand": "⏳", "gear": "⚙️", "wrench": "🔧"}
 # ntfy JSON-priority — число 1..5. Маппим из наших строковых уровней.
 _PRIORITY_NUM = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5, "urgent": 5}
 
@@ -389,6 +389,117 @@ def _ntfy_header() -> str:
     except Exception:
         sess = "<unknown>"
     return f"session: {sess}\nmachine: {_machine_id()}\n"
+
+
+# --- LS auto-recovery (E-16: Electron renderer crash mid-cycle) ----------
+#
+# Когда LS API на 36555 умирает посреди цикла (Chromium renderer crash,
+# OOM, etc), warmup_api пытается start_warmup → WinError 10061 connection
+# refused. Раньше эта ошибка попадала в общий ApiError и улетала в
+# 9-step pyramid — 27 минут впустую (pyramid ждёт что 409 lock рассосётся,
+# но тут не lock, а мёртвая LS), потом ⚠️ failed (api).
+#
+# Теперь детектим тип ошибки. Если connection refused — НЕ pyramid,
+# а немедленный kill+launch LS через ls_launch.bat (тот же скрипт, что
+# использует watchdog и Startup folder). Один LS recovery занимает
+# 30-90 сек, после чего цикл продолжается с того же места.
+
+_LS_RECOVERY_MAX_PER_CHUNK = 2  # больше двух раз на чанк не пытаемся,
+                                # значит что-то системное, эскалация
+
+
+def _is_connection_refused(err: Exception) -> bool:
+    """True если ошибка — connection refused / WinError 10061 от LS API.
+    Это значит LS локально мёртвая, а не серверный 409 conflict."""
+    msg = str(err).lower()
+    return (
+        "10061" in msg
+        or "connection refused" in msg
+        or "refused" in msg and "actively" in msg
+    )
+
+
+def _ls_kill_and_relaunch(max_wait_seconds: float = 90.0) -> bool:
+    """Kill all LS + Popen ls_launch.bat + ping API до RESTART_GRACE.
+    Возвращает True если API живая после relaunch.
+
+    Использует ls_launch.bat (тот же что watchdog и Startup folder) —
+    единый путь для launching LS с правильной cwd для evo:// protocol."""
+    import subprocess as _sp
+    import urllib.request as _ureq
+
+    log.warning("LS recovery: taskkill /F LS")
+    try:
+        _sp.run(
+            ["taskkill", "/F", "/IM", "Linken Sphere 2.exe", "/T"],
+            capture_output=True, text=True, timeout=15, errors="replace",
+        )
+    except Exception as e:
+        log.warning("LS recovery: taskkill failed: %s", e)
+
+    bat = ROOT / "ls_launch.bat"
+    if not bat.exists():
+        log.error("LS recovery: %s не найден — recovery невозможен", bat)
+        return False
+
+    log.warning("LS recovery: %s", bat.name)
+    try:
+        _sp.Popen(
+            ["cmd", "/c", str(bat)],
+            cwd=str(ROOT),
+            creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+        )
+    except Exception as e:
+        log.error("LS recovery: ls_launch.bat не запустился: %s", e)
+        return False
+
+    # Ждём пока API оживёт. Polling каждые 5 сек до max_wait_seconds.
+    deadline = time.time() + max_wait_seconds
+    ping_url = "http://127.0.0.1:36555/sessions"
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            with _ureq.urlopen(ping_url, timeout=5) as resp:
+                if 200 <= resp.status < 300:
+                    elapsed = max_wait_seconds - (deadline - time.time())
+                    log.info("LS recovery: API ОЖИЛА за %.0fс", elapsed)
+                    return True
+        except Exception:
+            continue
+
+    log.error("LS recovery: API не ожила за %.0fс", max_wait_seconds)
+    return False
+
+
+def _notify_ls_recovered(chunk_idx: int, total_chunks: int, recovery_n: int) -> None:
+    """Шлёт 🔧 push когда LS auto-recovery прошёл успешно."""
+    try:
+        notify_ntfy(
+            _ntfy_header()
+            + f"LS API легла на чанке {chunk_idx}/{total_chunks}\n"
+            + f"перезапустил LS, продолжаю прогрев\n"
+            + f"recovery #{recovery_n}",
+            title="LS auto-recovered",
+            priority="low",
+            tags="wrench",
+        )
+    except Exception as e:
+        log.warning("notify ls-recovered upalo: %s", e)
+
+
+def _notify_ls_recovery_failed(chunk_idx: int, total_chunks: int) -> None:
+    """Шлёт ⚠️ push если recovery не сработал — API не ожила за timeout."""
+    try:
+        notify_ntfy(
+            _ntfy_header()
+            + f"LS API легла на чанке {chunk_idx}/{total_chunks}\n"
+            + f"попытка перезапуска не помогла — API так и не ожила",
+            title="LS recovery failed",
+            priority="high",
+            tags="warning",
+        )
+    except Exception as e:
+        log.warning("notify ls-recovery-failed upalo: %s", e)
 
 
 def load_url_pool(cfg: configparser.ConfigParser) -> list[str]:
@@ -854,7 +965,8 @@ def _is_warmup_done(state: dict | None) -> bool:
     return status in TERMINAL_STATUSES
 
 
-def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigParser) -> bool:
+def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigParser,
+                          chunk_idx: int = 0, total_chunks: int = 0) -> bool:
     interval = cfg.getfloat("api", "poll_interval_seconds", fallback=5.0)
     timeout = cfg.getfloat("api", "poll_timeout_seconds", fallback=1200.0)
     deadline = time.time() + timeout
@@ -862,8 +974,30 @@ def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigP
     # Дать LS пару секунд перейти в "warmup" — иначе можем словить старый
     # status и решить, что прогрев уже закончился.
     time.sleep(min(interval, 3.0))
+    # E-16 LS recovery counter — max _LS_RECOVERY_MAX_PER_CHUNK на одно ожидание
+    ls_recoveries = 0
     while time.time() < deadline:
-        state = client.get_session_state(uuid)
+        try:
+            state = client.get_session_state(uuid)
+        except ApiError as e:
+            # Polling может словить connection refused если LS легла
+            # во время прогрева чанка. Попытка recovery.
+            if _is_connection_refused(e) and ls_recoveries < _LS_RECOVERY_MAX_PER_CHUNK:
+                ls_recoveries += 1
+                log.warning(
+                    "polling: API connection refused — LS мёртвая, recovery #%d/%d",
+                    ls_recoveries, _LS_RECOVERY_MAX_PER_CHUNK,
+                )
+                if _ls_kill_and_relaunch():
+                    _notify_ls_recovered(chunk_idx, total_chunks, ls_recoveries)
+                    # API ожила — продолжаем polling. Status узнаем на след. итер.
+                    last_status = None  # форс log следующего status
+                    continue
+                else:
+                    _notify_ls_recovery_failed(chunk_idx, total_chunks)
+                    raise  # признаём что recovery не помог, цикл прерывается
+            # Не connection refused (другой ApiError) ИЛИ исчерпали recoveries
+            raise
         if state is not None:
             status = state.get("status")
             if status != last_status:
@@ -1040,6 +1174,7 @@ def run() -> int:
                 # станет 90 мин. Trade-off: медленнее, но стабильнее на multi-VPS
                 # аккаунте — меньше ⏳ cycle paused alerts.
                 _last_err: Exception | None = None
+                ls_recoveries = 0  # max _LS_RECOVERY_MAX_PER_CHUNK на чанк
                 for attempt in range(9):
                     try:
                         client.start_warmup(uuid, chunk, view_depth, time_per_url)
@@ -1047,8 +1182,30 @@ def run() -> int:
                         break
                     except ApiError as e:
                         msg = str(e)
-                        retriable = "HTTP 409" in msg and "Session is used" in msg
                         _last_err = e
+
+                        # E-16 LS recovery: connection refused = LS локально мёртвая
+                        # (Electron renderer crash, OOM etc), а НЕ серверный 409.
+                        # Pyramid тут не поможет — нужен kill+launch LS.
+                        if _is_connection_refused(e) and ls_recoveries < _LS_RECOVERY_MAX_PER_CHUNK:
+                            ls_recoveries += 1
+                            log.warning(
+                                "чанк %d: API connection refused — LS мёртвая, "
+                                "запускаю recovery #%d/%d",
+                                i, ls_recoveries, _LS_RECOVERY_MAX_PER_CHUNK,
+                            )
+                            if _ls_kill_and_relaunch():
+                                _notify_ls_recovered(i, len(chunks), ls_recoveries)
+                                # Retry немедленно — recovery вернулся когда API ожила
+                                continue
+                            else:
+                                _notify_ls_recovery_failed(i, len(chunks))
+                                # Fall through к pyramid — но он тоже скорее всего
+                                # не помог: если recovery провалился, API мёртвая
+                                # надолго. break чтобы не тратить ещё 27 мин.
+                                break
+
+                        retriable = "HTTP 409" in msg and "Session is used" in msg
                         if not retriable or attempt == 8:
                             break
                         if attempt == 0:
@@ -1094,7 +1251,7 @@ def run() -> int:
                                 log.warning("final nuclear recovery упал: %s", final_e)
                 if _last_err is not None:
                     raise ApiError(f"чанк {i}/{len(chunks)}: start_warmup упал → {_last_err}") from _last_err
-                ok = wait_for_warmup_done(client, uuid, cfg)
+                ok = wait_for_warmup_done(client, uuid, cfg, i, len(chunks))
                 if not ok:
                     log.warning("чанк %d не подтвердился поллингом", i)
                 chunks_done += 1
