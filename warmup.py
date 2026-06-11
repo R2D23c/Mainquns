@@ -1481,19 +1481,34 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("delete")
     time.sleep(0.3)
-    # _type_via_clipboard использует SendInput Unicode — на той же скорости,
-    # что и pyautogui.typewrite interval=0.01, проглатывал буквы из пути,
-    # и Windows ругался «The file name is not valid».
+    # ТРЁХСЛОЙНАЯ ЗАЩИТА для надёжной передачи пути в IFileDialog
+    # (наблюдалось failure на 172.86.109.145: только "C" попадал в поле,
+    # диалог жаловался "C - File not found", т.к. Windows воспринимал
+    # символ ":" как навигационную команду на диск C:\, сбрасывал поле
+    # и остальные символы шли в file list navigation):
     #
-    # ВАЖНО: оборачиваем путь в ДВОЙНЫЕ КАВЫЧКИ. Без них Windows file dialog
-    # на некоторых VPS интерпретирует "C:" как навигационную команду —
-    # переходит на диск C:\, сбрасывает поле, и дальнейшие символы идут
-    # в навигацию а не в File name. Результат: в поле остаётся "C",
-    # Enter тычется в "C", диалог жалуется "C - File not found".
-    # Кавычки делают путь "литералом имени файла" — никаких авто-навигаций.
-    # Наблюдалось на 172.86.109.145 (Windows-build с активным AutoComplete).
-    _type_via_clipboard(f'"{file_path}"')
-    time.sleep(0.8)  # было 0.3 — даём Windows обработать путь перед Enter
+    # СЛОЙ 1: ДВОЙНЫЕ КАВЫЧКИ вокруг пути. Tell file dialog "это литерал
+    # имени файла, не навигация". Работает в большинстве классических
+    # Open dialog Windows.
+    #
+    # СЛОЙ 2: TYPE CHAR-BY-CHAR с 30мс паузой. На медленных VPS batch
+    # SendInput (всё за один call) может конфликтовать с async-обработкой
+    # navigation символов в IFileDialog: пока dialog решает что делать с
+    # ":", остальные символы могут перехватываться address bar или auto-
+    # complete. Per-char timing даёт dialog время полностью обработать
+    # каждый символ до следующего.
+    #
+    # СЛОЙ 3: SETTLE PAUSE 7 секунд после ввода ДО нажатия Enter.
+    # Даёт Windows полностью обработать всю строку, autocomplete dropdown
+    # появиться/исчезнуть, любые async navigation hints отработать.
+    # Только когда dialog в spokojnom финальном состоянии — жмём Enter.
+    quoted_path = f'"{file_path}"'
+    log.info("вводим путь (%d символов) посимвольно с 30мс паузой", len(quoted_path))
+    for ch in quoted_path:
+        _send_unicode_to_focused(ch)
+        time.sleep(0.03)
+    log.info("ждём 7с — даём Windows полностью settled state перед Enter")
+    time.sleep(7.0)
     pyautogui.press("enter")
     time.sleep(cfg.getfloat("matching", "step_delay"))
 
