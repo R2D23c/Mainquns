@@ -1491,22 +1491,24 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     # имени файла, не навигация". Работает в большинстве классических
     # Open dialog Windows.
     #
-    # СЛОЙ 2: TYPE CHAR-BY-CHAR с 30мс паузой. На медленных VPS batch
+    # СЛОЙ 2: TYPE CHAR-BY-CHAR с 120мс паузой. На медленных VPS batch
     # SendInput (всё за один call) может конфликтовать с async-обработкой
     # navigation символов в IFileDialog: пока dialog решает что делать с
     # ":", остальные символы могут перехватываться address bar или auto-
-    # complete. Per-char timing даёт dialog время полностью обработать
-    # каждый символ до следующего.
+    # complete. Per-char timing даёт dialog ГАРАНТИРОВАННОЕ время полностью
+    # обработать каждый символ до следующего (120мс с большим запасом для
+    # 2c/4gb VPS с лагающим Electron-renderer в LS).
     #
     # СЛОЙ 3: SETTLE PAUSE 7 секунд после ввода ДО нажатия Enter.
     # Даёт Windows полностью обработать всю строку, autocomplete dropdown
     # появиться/исчезнуть, любые async navigation hints отработать.
     # Только когда dialog в spokojnom финальном состоянии — жмём Enter.
     quoted_path = f'"{file_path}"'
-    log.info("вводим путь (%d символов) посимвольно с 30мс паузой", len(quoted_path))
+    log.info("вводим путь (%d символов) посимвольно с 120мс паузой (~%.1fс)",
+             len(quoted_path), len(quoted_path) * 0.12)
     for ch in quoted_path:
         _send_unicode_to_focused(ch)
-        time.sleep(0.03)
+        time.sleep(0.12)
     log.info("ждём 7с — даём Windows полностью settled state перед Enter")
     time.sleep(7.0)
     pyautogui.press("enter")
