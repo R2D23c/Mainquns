@@ -1484,7 +1484,15 @@ def handle_open_file_dialog(file_path: str, cfg: configparser.ConfigParser) -> N
     # _type_via_clipboard использует SendInput Unicode — на той же скорости,
     # что и pyautogui.typewrite interval=0.01, проглатывал буквы из пути,
     # и Windows ругался «The file name is not valid».
-    _type_via_clipboard(file_path)
+    #
+    # ВАЖНО: оборачиваем путь в ДВОЙНЫЕ КАВЫЧКИ. Без них Windows file dialog
+    # на некоторых VPS интерпретирует "C:" как навигационную команду —
+    # переходит на диск C:\, сбрасывает поле, и дальнейшие символы идут
+    # в навигацию а не в File name. Результат: в поле остаётся "C",
+    # Enter тычется в "C", диалог жалуется "C - File not found".
+    # Кавычки делают путь "литералом имени файла" — никаких авто-навигаций.
+    # Наблюдалось на 172.86.109.145 (Windows-build с активным AutoComplete).
+    _type_via_clipboard(f'"{file_path}"')
     time.sleep(0.8)  # было 0.3 — даём Windows обработать путь перед Enter
     pyautogui.press("enter")
     time.sleep(cfg.getfloat("matching", "step_delay"))
