@@ -27,6 +27,25 @@ import sys
 import time
 from pathlib import Path
 
+# Hide inherited console window — на запуске Task Scheduler нас спавнит через
+# `cmd.exe /c run_api.bat` с visible cmd window. Все output redirect'нуты в
+# warmup.log (см. run_api.bat), поэтому окно ВИЗУАЛЬНО ПУСТОЕ и только мешает:
+# - перекрывает LS UI на 5-10 минут UI install
+# - может перехватить focus от pyautogui clicks
+# Прячем сразу. warmup_api.py в конце UI install спавнится как DETACHED
+# subprocess, у него своя AllocConsole + WriteConsoleW banner — она будет
+# видна (новое окно), а наше пустое — больше нет.
+if sys.platform == "win32":
+    try:
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        SW_HIDE = 0
+        console_hwnd = kernel32.GetConsoleWindow()
+        if console_hwnd:
+            user32.ShowWindow(console_hwnd, SW_HIDE)
+    except Exception:
+        pass
+
 # DPI awareness ОБЯЗАТЕЛЬНО до импорта pyautogui/Pillow.
 # Иначе на Windows со scaling != 100% ImageGrab отдаёт физические пиксели,
 # а pyautogui.click трактует их как логические — клики уходят не туда.
