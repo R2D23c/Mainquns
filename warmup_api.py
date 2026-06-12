@@ -408,15 +408,61 @@ _LS_RECOVERY_MAX_PER_CHUNK = 2  # больше двух раз на чанк н�
                                 # значит что-то системное, эскалация
 
 
-def _is_connection_refused(err: Exception) -> bool:
-    """True если ошибка — connection refused / WinError 10061 от LS API.
-    Это значит LS локально мёртвая, а не серверный 409 conflict."""
+def _is_ls_api_dead(err: Exception) -> bool:
+    """True если ошибка свидетельствует о смерти/зависании LS API локально
+    (НЕ серверный 409 conflict, НЕ HTTP-валидационная ошибка от LS).
+
+    Расширено в коммите по падениям 172.86.110.195 и 172.86.88.228:
+    раньше ловили только connection refused (LS не принимает соединения),
+    но есть ещё 3 сценария "LS мёртвая" с другими признаками:
+
+    1) "10061" / "connection refused" / "actively refused"
+       → LS API не принимает соединения. Electron renderer убит/crashed,
+          порт 36555 не слушает. Классический случай.
+
+    2) "timed out" / "timeout"
+       → LS API НЕ закрыла порт, но НЕ отвечает за http_timeout_seconds=30с.
+          Renderer hung, event loop заклинило. Restart нужен.
+
+    3) "10053" / "aborted"
+       → LS убила соединение посреди запроса. Electron crashed mid-render,
+          сокет закрылся ungracefully. Restart нужен.
+
+    4) "10054" / "reset by peer" / "forcibly closed"
+       → LS reset соединение. Internal state corrupted, network stack
+          в LS Electron'е сломался. Restart нужен.
+
+    Все 4 сценария лечатся одинаково — kill+launch LS через ls_launch.bat.
+    Поэтому ОДНА функция-детектор и ОДНА recovery-стратегия.
+
+    НЕ срабатывает на:
+    - HTTP 409 (Session is used) → pyramid retry, не recovery
+    - HTTP 400/404/500 (LS ответила и сказала "no") → НЕ recovery
+    """
     msg = str(err).lower()
-    return (
-        "10061" in msg
-        or "connection refused" in msg
-        or "refused" in msg and "actively" in msg
-    )
+    # Network-level "LS dead" patterns
+    if "10061" in msg or "connection refused" in msg:
+        return True
+    if "10053" in msg or "aborted" in msg:
+        return True
+    if "10054" in msg or "reset by peer" in msg or "forcibly closed" in msg:
+        return True
+    if "timed out" in msg or "timeout" in msg:
+        # Ловим только сетевой timeout. HTTP-error от LS "timeout" в JSON-body
+        # не должны провоцировать recovery, но они приходят как "HTTP 400/500
+        # body содержит timeout" — наш _request формирует "HTTP {code}: {body}"
+        # для HTTPError, и "сеть/таймаут: {e}" для всего остального. Проверяем
+        # что сообщение не начинается с "http " — это HTTP-error от LS.
+        if not msg.startswith("post ") or "→ сеть/таймаут:" in msg or "urlopen error" in msg:
+            return True
+    # "actively refused" pattern (Win11 verbose form of connection refused)
+    if "refused" in msg and "actively" in msg:
+        return True
+    return False
+
+
+# Обратная совместимость для existing usages — старое имя ссылается на новое
+_is_connection_refused = _is_ls_api_dead
 
 
 def _ls_kill_and_relaunch(max_wait_seconds: float = 90.0) -> bool:
