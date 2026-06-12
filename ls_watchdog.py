@@ -36,6 +36,8 @@ Task Scheduler tick для warmup_api всё равно через 45 мин в 
 """
 
 import datetime
+import json
+import socket
 import subprocess
 import sys
 import urllib.request
@@ -50,6 +52,13 @@ TASK_NAME = "LinkenSphereWarmup"
 API_URL = "http://127.0.0.1:36555/sessions"
 HTTP_TIMEOUT = 5
 RESTART_THRESHOLD = 3
+
+# ntfy push topic — тот же что в warmup_api.py / notify_boot.py. Watchdog
+# намеренно НЕ импортит warmup_api (чтобы работать в любом состоянии репо),
+# поэтому duplicate'им константы и send_ntfy локально.
+NTFY_TOPIC = "warmup-r2d2-7m9k4n2p8q5xFx168xx1QQE"
+NTFY_URL = "https://ntfy.sh"
+NTFY_TIMEOUT = 15
 
 # STUCK DETECTION тайминги.
 # 75 мин: нормальный цикл (45 мин interval + 37 мин cycle = 82 мин worst case)
@@ -70,6 +79,123 @@ def _log(msg: str) -> None:
             f.write(f"[{ts}] {msg}\n")
     except Exception:
         pass
+
+
+# ---- ntfy helpers (self-contained, как в notify_boot.py) ----
+# Чтобы оператор видел КАЖДОЕ recovery событие в push'ах, не только
+# warmup_api'шные. Раньше watchdog kill+launch / force-trigger были
+# полностью silent — только в watchdog.log. Это создавало "молчаливые
+# гэпы" где watchdog уже всё разрулил, но оператор узнавал об этом
+# только через ⚙️ цикл-push через 45+ минут.
+
+
+def _machine_id() -> str:
+    """Публичный IP — стабильный уникальный ID VPS (как в warmup_api/notify_boot).
+    Hostname часто бесполезен ('WIN-XXX'). Два провайдера IP с timeout 5с;
+    fallback на hostname если нет сети."""
+    for url in ("https://api.ipify.org", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ip = resp.read().decode("ascii", errors="ignore").strip()
+                if ip:
+                    return ip
+        except Exception:
+            continue
+    try:
+        return socket.gethostname() or "no-ip"
+    except Exception:
+        return "no-ip"
+
+
+def _load_session_name() -> str:
+    """Имя сессии (CL-XXXXXXXX) из .session_name. Для watchdog event'ов это
+    оператору ориентир 'какая VPS прислала push' в скоплении уведомлений."""
+    f = ROOT / ".session_name"
+    try:
+        if f.exists():
+            n = f.read_text(encoding="utf-8").strip()
+            if n:
+                return n
+    except Exception:
+        pass
+    return "<unknown>"
+
+
+def _send_ntfy(title: str, body: str, priority: int, tags: list[str]) -> bool:
+    """POST на ntfy.sh с короткой обёрткой ошибок. priority: 1..5 (low=2)."""
+    payload = {
+        "topic": NTFY_TOPIC,
+        "title": title,
+        "message": body,
+        "priority": priority,
+        "tags": tags,
+    }
+    try:
+        req = urllib.request.Request(
+            NTFY_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=NTFY_TIMEOUT) as resp:
+            resp.read()
+            return 200 <= resp.status < 300
+    except Exception as e:
+        _log(f"ntfy push failed: {e!r}")
+        return False
+
+
+def _notify_ls_restarted(reason: str = "API down 3 strikes") -> None:
+    """🔧 watchdog kill+launch отработал успешно."""
+    body = (
+        f"session: {_load_session_name()}\n"
+        f"machine: {_machine_id()}\n"
+        f"watchdog перезапустил LS\n"
+        f"причина: {reason}"
+    )
+    _send_ntfy(
+        title="🔧 watchdog: LS restarted",
+        body=body,
+        priority=2,  # low
+        tags=["wrench"],
+    )
+
+
+def _notify_ls_restart_failed(reason: str = "API down 3 strikes") -> None:
+    """⚠️ watchdog kill+launch попытался, но LS не поднимается (ls_launch.bat
+    отсутствует/не запустился). High priority — оператору надо RDP'нуться."""
+    body = (
+        f"session: {_load_session_name()}\n"
+        f"machine: {_machine_id()}\n"
+        f"watchdog НЕ смог поднять LS\n"
+        f"причина: {reason}\n"
+        f"требуется RDP-диагностика"
+    )
+    _send_ntfy(
+        title="⚠️ watchdog: LS restart failed",
+        body=body,
+        priority=4,  # high
+        tags=["warning"],
+    )
+
+
+def _notify_force_trigger(age_min: float, uptime_min: float | None) -> None:
+    """🔧 watchdog force-trigger'нул stuck main task. Low priority — событие
+    нормальное (TS квирк), просто чтобы оператор видел что watchdog работает."""
+    body = (
+        f"session: {_load_session_name()}\n"
+        f"machine: {_machine_id()}\n"
+        f"main task застрял (last run {age_min:.0f} мин назад)\n"
+        f"watchdog force-triggered task"
+    )
+    if uptime_min is not None:
+        body += f"\nuptime: {uptime_min:.0f} мин"
+    _send_ntfy(
+        title="🔧 watchdog: stuck task triggered",
+        body=body,
+        priority=2,  # low
+        tags=["wrench"],
+    )
 
 
 def _read_counter() -> int:
@@ -244,6 +370,8 @@ def _check_and_unstick_main_task() -> None:
     )
     ok = _force_trigger_main_task()
     _log(f"force-trigger: {'OK' if ok else 'FAILED'}")
+    if ok:
+        _notify_force_trigger(age, uptime)
 
 
 def _self_disable() -> None:
@@ -297,6 +425,12 @@ def main() -> int:
         _log("threshold reached → restart LS")
         ok = _restart_ls()
         _log(f"restart: {'OK (ls_launch.bat invoked)' if ok else 'FAILED'}")
+        # Push в ntfy — оператор видит ВСЕ recovery события, не только
+        # warmup_api'шные. Раньше watchdog restart был полностью silent.
+        if ok:
+            _notify_ls_restarted("API down 3 strikes (~15 мин)")
+        else:
+            _notify_ls_restart_failed("ls_launch.bat не запустился или отсутствует")
         # Сброс счётчика. Если LS снова умрёт — отсчёт начнётся с нуля.
         _write_counter(0)
     return 0
