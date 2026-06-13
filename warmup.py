@@ -1612,6 +1612,63 @@ def _check_api_port_alive(base_url: str) -> bool:
         return False
 
 
+# Расписание поллинга /sessions ПОСЛЕ Mass Import dialog'а в warmup.py.
+# Между моментом "warmup.py видит закрытие диалога Importing sessions" и
+# моментом "LS API /sessions реально отдаёт новую сессию" — может пройти
+# от 1с до нескольких минут (наблюдалось ≥22с на .81 и .229: warmup.py
+# сразу спавнил warmup_api, тот через секунду стучался в /sessions, не
+# находил → ⚠️ false-error push рядом с ✅ success push). LS-cloud
+# синхронизация после Mass Import не атомарна: dialog закрывается раньше
+# чем sessions catalog становится consistent через API.
+#
+# Поллим с прогрессивными интервалами (cumulative ~7.5 мин) перед тем как
+# спавнить warmup_api. Если нашлась — спавним нормально. Если не нашлась
+# за все попытки — отдельный ⚠️ push с понятной причиной, warmup_api НЕ
+# спавним. Следующий 45-мин tick (LinkenSphereWarmup → run_api.bat →
+# warmup_api по флагу .session_imported) подхватит сам.
+_POST_IMPORT_POLL_SCHEDULE = [10, 30, 60, 120, 240]
+
+
+def _session_visible_in_catalog(base_url: str, session_name: str) -> bool:
+    """GET /sessions → ищем имя в массиве. True если найдена.
+    Любая сетевая ошибка / 4xx / 5xx считается за «не найдена» — следующая
+    попытка поллинга разрулит."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/sessions", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        if not isinstance(data, list):
+            return False
+        return any(
+            isinstance(s, dict) and s.get("name") == session_name
+            for s in data
+        )
+    except Exception as e:
+        log.info("poll /sessions: запрос упал (%s) — считаем «не найдена»", e)
+        return False
+
+
+def _wait_for_session_in_catalog(base_url: str, session_name: str) -> bool:
+    """Поллим /sessions до появления сессии или истечения расписания.
+    True = нашлась (warmup_api спавнить), False = не нашлась (⚠️ push,
+    НЕ спавнить, отдать следующему 45-мин tick'у)."""
+    total = 0
+    for i, delay in enumerate(_POST_IMPORT_POLL_SCHEDULE, 1):
+        time.sleep(delay)
+        total += delay
+        if _session_visible_in_catalog(base_url, session_name):
+            log.info(
+                "poll #%d: сессия %r видна в /sessions через ~%dс после import",
+                i, session_name, total)
+            return True
+        log.info(
+            "poll #%d/%d: сессия %r ещё не видна (cum %dс) — продолжаю ждать",
+            i, len(_POST_IMPORT_POLL_SCHEDULE), session_name, total)
+    return False
+
+
 def _parse_api_port_from_config(cfg: configparser.ConfigParser) -> tuple[str, int]:
     """Тянет base_url из config.ini [api] и вытаскивает оттуда порт.
     Возвращает (base_url, port)."""
@@ -1854,6 +1911,37 @@ def run() -> int:
                 )
             except Exception:
                 pass
+
+        # Ждём пока LS реально засветит новую сессию в /sessions catalog.
+        # Mass Import dialog'у мало "закрылся" — LS-cloud sync доезжает с
+        # задержкой. Без этого ожидания warmup_api спавнится через секунду,
+        # сразу падает на find_session_by_name → ⚠️ false-error push.
+        # Поллинг работает ПОСЛЕ ✅ success push'а: оператор уже видел
+        # "RDP можно отключать", полл-цикл это HTTP-only и переживает
+        # disconnect RDP (та же категория что warmup_api).
+        base_url_for_poll, _ = _parse_api_port_from_config(cfg)
+        if not _wait_for_session_in_catalog(base_url_for_poll, session_name):
+            poll_total_min = sum(_POST_IMPORT_POLL_SCHEDULE) // 60
+            log.warning(
+                "сессия %r не появилась в /sessions за ~%d мин — "
+                "warmup_api НЕ спавню. Следующий 45-мин tick подхватит.",
+                session_name, poll_total_min)
+            try:
+                notify_ntfy(
+                    _ntfy_header() +
+                    f"сессия {session_name!r} не появилась в LS /sessions "
+                    f"за ~{poll_total_min} мин после Mass Import.\n"
+                    f"warmup_api НЕ стартован. Следующий 45-мин tick "
+                    f"попробует через run_api.bat сам.\n"
+                    f"Если повторится — проверь машину руками "
+                    f"(возможно нужен manual re-import через LS GUI).",
+                    title="warmup pending (ui)",
+                    priority="high",
+                    tags="warning",
+                )
+            except Exception:
+                pass
+            return 0
 
         # Сразу запускаем warmup_api.py как DETACHED subprocess. Он:
         # - не нуждается в desktop'е (HTTP-only, на 127.0.0.1:36555)
