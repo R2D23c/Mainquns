@@ -296,22 +296,47 @@ def click_at_offset(name: str, xf: float, yf: float, cfg: configparser.ConfigPar
 
 
 def _find_template_box(name: str, cfg: configparser.ConfigParser) -> tuple[int, int, int, int]:
-    """Возвращает (left, top, width, height) найденного шаблона."""
+    """Возвращает (left, top, width, height) найденного шаблона.
+
+    FHD-fallback: если primary `{name}.png` не сматчил, пробует
+    `{name}_fhd.png` и нумерованные варианты — та же логика что в
+    find_template (см. `_fhd_fallback_names`). Возвращает box первого
+    варианта который прошёл порог."""
     conf = cfg.getfloat("matching", "confidence")
     timeout = cfg.getfloat("matching", "wait_seconds")
     tpl_path = TEMPLATES_DIR / f"{name}.png"
-    tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
-    if tpl is None:
+    if not tpl_path.exists():
         raise FileNotFoundError(f"шаблон {tpl_path} не читается")
-    h, w = tpl.shape[:2]
+
+    # Загружаем primary + все FHD-варианты заранее, чтобы не делать
+    # imread() в цикле каждые 0.5с
+    variants: list[tuple[str, np.ndarray]] = []
+    primary_tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
+    if primary_tpl is not None:
+        variants.append((name, primary_tpl))
+    for fhd_name in _fhd_fallback_names(name):
+        fhd_tpl = cv2.imread(str(TEMPLATES_DIR / f"{fhd_name}.png"), cv2.IMREAD_COLOR)
+        if fhd_tpl is not None:
+            variants.append((fhd_name, fhd_tpl))
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        res = cv2.matchTemplate(grab_screen_bgr(), tpl, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        if max_val >= conf:
-            log.info("match %s: confidence=%.3f", name, max_val)
-            return (max_loc[0], max_loc[1], w, h)
+        screen = grab_screen_bgr()
+        if screen is None:
+            time.sleep(0.5)
+            continue
+        # Пробуем каждый вариант: primary, потом _fhd, потом _fhd2 и т.д.
+        for variant_name, variant_tpl in variants:
+            res = cv2.matchTemplate(screen, variant_tpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val >= conf:
+                if variant_name != name:
+                    log.info("match %s primary не прошёл, %s confidence=%.3f",
+                             name, variant_name, max_val)
+                else:
+                    log.info("match %s: confidence=%.3f", name, max_val)
+                vh, vw = variant_tpl.shape[:2]
+                return (max_loc[0], max_loc[1], vw, vh)
         time.sleep(0.5)
     raise TimeoutError(f"элемент '{name}' не появился за {timeout}s")
 
