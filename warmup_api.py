@@ -1103,7 +1103,7 @@ def run() -> int:
                 _ntfy_header() +
                 f"total: {current}/{target} URL warmed\n" + tail,
                 title="warmup all done",
-                priority="low",
+                priority="high",
                 tags="tada",
             )
             mark_notified_done()
@@ -1346,7 +1346,7 @@ def run() -> int:
                 f"total time: {total_elapsed}\n"
                 f"cookies: {cookies_str}\n" + tail,
                 title="warmup all done",
-                priority="low",
+                priority="high",
                 tags="tada",
             )
             mark_notified_done()
