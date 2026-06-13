@@ -270,3 +270,138 @@ CLAUDE.md              ← этот файл
 6. **Оператор хочет видеть прогресс через push'и**, не через RDP. Каждое
    recovery событие → notification (🔄 reboot, 🔧 LS recovered, ⚠️ failed).
    Молчание = "может работает, может нет" — не делай это default.
+
+## Сессия 13 июня 2026 — FHD-render quirk + polling /sessions
+
+### FHD-render проблема и решение
+
+Часть VPS (наблюдалось на Tier-2 хостингах) рендерит LS UI с другими
+subpixel artefact'ами — даже при том же 2560×1440 / DPI 100% / тех же
+templates. cv2.matchTemplate с TM_CCOEFF_NORMED падает с 0.99 до 0.4-0.7
+на ВСЕХ templates, scale=0.75 best. Это **не fix'ится** ни понижением
+threshold (false positives), ни blur'ом (помогает +0.15, не дотягивает),
+ни регенерацией templates (надо на каждой VPS).
+
+**Решение: FHD-fallback templates `{name}_fhd.png` + код-fallback**
+
+В warmup.py три функции matching'а (`find_template`,
+`_match_template_in_region`, `_find_template_box`) после фейла primary
+автоматически пробуют `{name}_fhd.png`. Если есть — confidence на FHD-render
+VPS поднимается до 0.99. На working VPS primary template даёт 0.99 сразу,
+fallback не активируется. Threshold ОСТАЁТСЯ 0.80, никаких false-positive
+рисков.
+
+Расширение: нумерованные альтернативы `{name}N_fhd.png` (N=2..9) — для
+случая когда один FHD-crop работает не везде, делаем несколько разных
+crop'ов. **Защита от коллизии**: если существует primary `{name}N.png`
+(например `get_started2.png` это самостоятельный template welcome screen,
+не альтернатива get_started), то `{name}N_fhd` НЕ пробуется как fallback
+для `{name}`. См. `_fhd_fallback_names` хелпер.
+
+**Какие templates имеют FHD-вариант на 13.06.2026** (templates/):
+- Wizard: next_step_fhd, get_started_fhd
+- Auth: autologin_toggle_fhd, get_started2_fhd, skip_fhd, close_x_fhd, three_dots_fhd
+- API port: settings_gear_fhd, api_port_field_fhd
+- Session import: multiple_button_fhd, multiple_button2_fhd (альт crop), browse_file_fhd, import_button_fhd
+
+Если на новой VPS LS рендерит ещё одним способом — добавь {name}_fhd2.png
+или {name}2_fhd.png и проверь логи на confidence.
+
+### Mass Import hang + polling /sessions
+
+LS Mass Import dialog **может реально висеть 5-7 минут** после клика
+IMPORT — это cloud sync с ls.app, не баг. На быстрой VPS закрывается
+за 5-10 секунд, на медленной — до 7 минут. Симптом: visible "Importing
+sessions..." statusbar в LS GUI.
+
+**Проблема**: warmup.py раньше писал `.session_imported` и спавнил
+warmup_api сразу после исчезновения firewall popup (10с после клика
+IMPORT). warmup_api через секунду делал GET /sessions, не находил
+импортированную сессию → ⚠️ false-error push, сразу после ✅ success.
+
+**Решение: polling /sessions перед спавном warmup_api**
+
+В `warmup.py` после клика IMPORT и записи `.session_imported`:
+1. Полл GET /sessions с расписанием 10/30/60/120/240 секунд (cumulative ~7.5 мин)
+2. Если нашлась — спавним warmup_api как обычно
+3. Если не нашлась — ⚠️ push, warmup_api НЕ спавним, следующий 45-мин
+   tick подхватит сам через run_api.bat
+
+Расписание побирали эмпирически: на быстрой VPS poll #1 (10с) находит
+сразу, на медленной (.184 lineage) poll #5 (cumulative 7.5 мин) ловит
+успешный завершённый Mass Import. Если за 7.5 мин не закрылось —
+проблема серьёзнее, требует ручного вмешательства.
+
+См. `_POST_IMPORT_POLL_SCHEDULE` и `_wait_for_session_in_catalog` в warmup.py.
+
+### Push timing — ✅ ПОСЛЕ polling'а, не до
+
+Изначально ✅ "RDP можно отключать" слался сразу после Import-клика +
+10с firewall wait. На медленной VPS оператор получал push **за 5-6 минут
+до того** как реально безопасно. Если что-то падало на polling'е — оператор
+уже отключился по RDP и пропускал ⚠️.
+
+**Текущая последовательность** (commit `30510b0`):
+```
+IMPORT click → 10с firewall wait → polling /sessions (до 7.5 мин)
+                → ✅ "RDP можно отключать" + spawn warmup_api
+                or ⚠️ "session не появилась" + НЕ спавним
+```
+
+Push приходит **ровно** в момент когда warmup_api готов запуститься.
+Никакого fake "всё ок".
+
+### Recovery-команда встроена в error push'и
+
+В оба error push'а из warmup.py (polling timeout + общий catch-all)
+встроена inline команда для оператора. Может скопировать прямо из push'а:
+```
+taskkill /f /im "Linken Sphere 2.exe" /t 2>$null;
+taskkill /f /im python.exe /t 2>$null;
+cd C:\warmup; .\freshstart.bat;
+schtasks /run /tn LinkenSphereWarmup
+```
+
+### Финальный 🎉 push — priority=high
+
+`warmup all done` (target reached, cookies готовы) поднят с
+priority=low до priority=high. Звуковой push на телефон — оператор не
+пропускает "машина закончила, забирай". ⚙️ per-cycle (каждые 45 мин)
+остаётся priority=low — не задалбывает.
+
+### RDP-резолюция дисциплина
+
+Все RDP-сессии оператор обязан открывать через **2560×1440** `.rdp`
+файл. Внутри `mstsc.exe` → Display tab → Display configuration → выставить
+2560×1440 перед подключением. Сохранить как файл. Использовать ВСЕГДА.
+
+**Logoff'ом не закрывать**, только disconnect (закрыть окно). При
+disconnect Windows держит резолюцию RDP-сессии живой; logoff сбрасывает.
+
+VPS с залоченным видеодрайвером (не отдаёт >1080p) — встречается, не
+лечится со стороны клиента. Pyautogui увидит ту резолюцию, что отдаёт VPS.
+Для таких VPS FHD-templates спасают.
+
+### Расширение state-файлов
+
+Дополнения к таблице state-файлов из основной части:
+- `.wizards_done` — пустой, оператор/setup ставит когда wizard
+  пройден (manual click через RDP в первый раз). warmup.py
+  `_dismiss_customize_wizard_step` мгновенно возвращает False
+  если флаг на месте. Полезно когда matching wizard'а нестабилен
+  на конкретной VPS — можно прокликать руками + поставить флаг,
+  warmup.py не будет туда лезть.
+
+### Sessions на парке — общий каталог через LS-cloud
+
+Под одним LS-аккаунтом все VPS видят **общий список сессий** через
+GET /sessions — это cloud sync. Когда диагностируешь "сессия не
+найдена" на VPS-A, в curl /sessions ты увидишь сессии и VPS-B, VPS-C —
+это нормально. Ищи в списке имя из `.session_imported` на текущей VPS.
+
+### Шаблон коммитов в этой сессии
+
+Длинные коммиты с подробным "почему" — хорошо читаются через месяц,
+когда что-то отвалится и надо понять *зачем* вообще такая логика
+была сделана. Не stop на "fix bug" — пиши контекст, наблюдение,
+trade-off'ы, что отвергли и почему.
