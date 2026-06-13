@@ -1090,27 +1090,16 @@ def _dismiss_customize_wizard_step() -> bool:
     # (имя шаблона, top границы поиска, confidence)
     # get_started2_v2 — вариант кнопки welcome-экрана для новой версии LS
     # (другое сглаживание шрифта/рамки даёт ~0.79 со старым шаблоном).
-    # Все thresholds понижены на 0.10 после внедрения grayscale+blur
-    # preprocessing'а (commit eda66d2). На VPS с другим LS subpixel
-    # rendering'ом confidence упирается в потолок 0.6-0.78 даже с blur'ом;
-    # +0.15 от blur'а покрыл часть, понижение порога — оставшуюся.
-    # Blur снижает чувствительность к субпиксельному шуму, поэтому
-    # false-positive risk на 0.70 с blur'ом сравним со старым 0.80
-    # без blur'а.
     candidates = [
-        ("next_step",       lower_half_top, 0.70),
-        ("get_started",     lower_half_top, 0.70),
-        ("get_started2",    lower_half_top, 0.70),
-        ("get_started2_v2", lower_half_top, 0.70),
-        ("skip",            rect.top,       0.66),
+        ("next_step",       lower_half_top, 0.80),
+        ("get_started",     lower_half_top, 0.80),
+        ("get_started2",    lower_half_top, 0.80),
+        ("get_started2_v2", lower_half_top, 0.80),
+        ("skip",            rect.top,       0.76),
     ]
-    # close_x активен только в окне 30с после успешного клика на skip.
-    # Понижен 0.90 → 0.80: blur тоже его коснулся, и close_x исторически
-    # самый "защищённый" threshold (риск кликнуть закрытие самого LS).
-    # Поиск ограничен областью вне title-bar и правых 100px (где сидят
-    # min/max/close самой LS) — структурная защита остаётся.
+    # close_x активен только в окне 30с после успешного клика на skip
     if time.time() - _skip_clicked_at < _CLOSE_X_GRACE_AFTER_SKIP:
-        candidates.append(("close_x", rect.top, 0.80))
+        candidates.append(("close_x", rect.top, 0.90))
 
     for tpl_name, search_top, conf in candidates:
         if not (TEMPLATES_DIR / f"{tpl_name}.png").exists():
