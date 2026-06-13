@@ -174,6 +174,30 @@ def grab_screen_bgr() -> np.ndarray | None:
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
+def _preprocess_for_match(img: np.ndarray) -> np.ndarray:
+    """Готовит изображение к cv2.matchTemplate: grayscale + лёгкий 3x3
+    Gaussian blur.
+
+    Зачем. На некоторых VPS LS рисует UI с другим subpixel rendering
+    (ClearType / font smoothing / RDP video pipeline квиркует) — даже
+    при одинаковом физическом разрешении 2560×1440 и DPI 100% пиксели
+    по краям кнопок отличаются от templates. TM_CCOEFF_NORMED на color-
+    каналах остро реагирует на эти микро-различия и просаживает confidence
+    с 0.99 до 0.4-0.6 — ниже порога 0.80, matching падает.
+
+    Grayscale убирает цветовую компоненту (3 канала → 1, шумовая разница
+    утрорится), Gaussian blur 3x3 размазывает subpixel-артефакты по
+    краям не разрушая структуру кнопки. На «хороших» VPS confidence
+    слегка просаживается (0.99 → ~0.95), всё равно проходит порог. На
+    «плохих» — есть шанс подняться с 0.4 до 0.7+, что переводит matching
+    из категории «никогда не работает» в «работает при тех же templates».
+
+    ВАЖНО: обработка применяется ИДЕНТИЧНО к screen и template, иначе
+    correlation сломается."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.GaussianBlur(gray, (3, 3), 0)
+
+
 def find_template(name: str, confidence: float) -> tuple[int, int] | None:
     """Возвращает центр найденного шаблона на экране или None."""
     tpl_path = TEMPLATES_DIR / f"{name}.png"
@@ -189,7 +213,9 @@ def find_template(name: str, confidence: float) -> tuple[int, int] | None:
     screen = grab_screen_bgr()
     if screen is None:
         return None  # RDP отключена, screen grab упал → шаблон «не найден»
-    res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
+    tpl_p = _preprocess_for_match(tpl)
+    screen_p = _preprocess_for_match(screen)
+    res = cv2.matchTemplate(screen_p, tpl_p, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
     log.info("match %s: confidence=%.3f", name, max_val)
     if max_val < confidence:
@@ -240,10 +266,15 @@ def _find_template_box(name: str, cfg: configparser.ConfigParser) -> tuple[int, 
     if tpl is None:
         raise FileNotFoundError(f"шаблон {tpl_path} не читается")
     h, w = tpl.shape[:2]
+    tpl_p = _preprocess_for_match(tpl)
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        res = cv2.matchTemplate(grab_screen_bgr(), tpl, cv2.TM_CCOEFF_NORMED)
+        screen = grab_screen_bgr()
+        if screen is None:
+            time.sleep(0.5)
+            continue
+        res = cv2.matchTemplate(_preprocess_for_match(screen), tpl_p, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
         if max_val >= conf:
             log.info("match %s: confidence=%.3f", name, max_val)
@@ -883,6 +914,7 @@ def _match_template_in_region(
         log.warning("_match_template_in_region(%s): %s — пропуск", name, e)
         return None
     region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    region_p = _preprocess_for_match(region)
 
     best_val = 0.0
     best_loc = (0, 0)
@@ -894,7 +926,8 @@ def _match_template_in_region(
         if nw >= region_w or nh >= region_h:
             continue
         tpl = cv2.resize(tpl_orig, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
-        res = cv2.matchTemplate(region, tpl, cv2.TM_CCOEFF_NORMED)
+        tpl_p = _preprocess_for_match(tpl)
+        res = cv2.matchTemplate(region_p, tpl_p, cv2.TM_CCOEFF_NORMED)
         _, val, _, loc = cv2.minMaxLoc(res)
         if val > best_val:
             best_val = val
