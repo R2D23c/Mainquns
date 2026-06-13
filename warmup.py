@@ -194,16 +194,49 @@ def _try_match_single(name: str, screen: np.ndarray, confidence: float) -> tuple
     return (max_loc[0] + w // 2, max_loc[1] + h // 2)
 
 
+def _fhd_fallback_names(name: str) -> list[str]:
+    """Возвращает список FHD-вариантов для primary template `{name}`,
+    которые имеет смысл пробовать как fallback.
+
+    Правила:
+    1. Всегда пробуем `{name}_fhd.png` (если существует)
+    2. Дополнительно пробуем `{name}N_fhd.png` (N=2..9) — это альтернативные
+       FHD-нарезки той же кнопки (другой crop, другой стиль фона и т.п.)
+    3. КРИТИЧНО: пропускаем `{name}N_fhd` если существует primary
+       `{name}N.png` — это означает что `{name}N` это **самостоятельный**
+       template другого UI-элемента (например get_started vs get_started2),
+       и их FHD-варианты к get_started не относятся.
+
+    Пример:
+      `multiple_button` → пробуем multiple_button_fhd, потом multiple_button2_fhd
+         (нет primary multiple_button2.png — значит это альтернативный crop)
+      `get_started`     → пробуем только get_started_fhd
+         (get_started2.png это OTHER primary — get_started2_fhd НЕ для нас)"""
+    candidates: list[str] = []
+    primary_fhd = f"{name}_fhd"
+    if (TEMPLATES_DIR / f"{primary_fhd}.png").exists():
+        candidates.append(primary_fhd)
+    for n in range(2, 10):
+        # Если есть primary с этой нумерацией — она "своя" для другого
+        # template'а, не путаем
+        if (TEMPLATES_DIR / f"{name}{n}.png").exists():
+            continue
+        variant = f"{name}{n}_fhd"
+        if (TEMPLATES_DIR / f"{variant}.png").exists():
+            candidates.append(variant)
+    return candidates
+
+
 def find_template(name: str, confidence: float) -> tuple[int, int] | None:
     """Возвращает центр найденного шаблона на экране или None.
 
     FHD-fallback: если primary `{name}.png` не сматчил, пробует
-    `{name}_fhd.png` (нарезка с VPS где LS рендерит UI в режиме 0.75x
-    от оригинального templates). Файл `_fhd.png` опционален — если его
-    нет, behavior identical to legacy. На VPS с нормальным рендером
-    primary template даёт 0.99 → fallback не активируется. На VPS с
-    "FHD-render" primary даёт 0.5-0.7 (ниже порога) → fallback пробует
-    `_fhd` template который снят с такой же VPS → должен дать 0.99.
+    `{name}_fhd.png` и нумерованные варианты `{name}N_fhd.png` (см.
+    `_fhd_fallback_names`). Файлы _fhd опциональны — если их нет,
+    behavior identical to legacy. На VPS с нормальным рендером primary
+    template даёт 0.99 → fallback не активируется. На VPS с "FHD-render"
+    primary даёт 0.5-0.7 (ниже порога) → fallback пробует _fhd template
+    который снят с такой же VPS → должен дать 0.99.
 
     Threshold не меняется (остаётся 0.80). Никакого false-positive risk
     из понижения порога — мы вместо этого подкладываем правильный
@@ -220,11 +253,12 @@ def find_template(name: str, confidence: float) -> tuple[int, int] | None:
     pt = _try_match_single(name, screen, confidence)
     if pt is not None:
         return pt
-    # Fallback: пробуем FHD-нарезку если она есть для этого template'а
-    fhd_path = TEMPLATES_DIR / f"{name}_fhd.png"
-    if fhd_path.exists():
-        log.info("match %s primary не прошёл, пробую %s_fhd", name, name)
-        return _try_match_single(f"{name}_fhd", screen, confidence)
+    # Fallback: пробуем FHD-варианты по очереди
+    for fhd_name in _fhd_fallback_names(name):
+        log.info("match %s primary не прошёл, пробую %s", name, fhd_name)
+        pt = _try_match_single(fhd_name, screen, confidence)
+        if pt is not None:
+            return pt
     return None
 
 
@@ -960,12 +994,14 @@ def _match_template_in_region(
         name, region, region_w, region_h, left, top, confidence, scales)
     if pt is not None:
         return pt
-    # Fallback: FHD-нарезка
-    fhd_path = TEMPLATES_DIR / f"{name}_fhd.png"
-    if fhd_path.exists():
-        log.info("match %s primary не прошёл, пробую %s_fhd в том же region", name, name)
-        return _multiscale_match_in_region(
-            f"{name}_fhd", region, region_w, region_h, left, top, confidence, scales)
+    # Fallback: пробуем FHD-варианты (включая нумерованные альтернативы)
+    for fhd_name in _fhd_fallback_names(name):
+        log.info("match %s primary не прошёл, пробую %s в том же region",
+                 name, fhd_name)
+        pt = _multiscale_match_in_region(
+            fhd_name, region, region_w, region_h, left, top, confidence, scales)
+        if pt is not None:
+            return pt
     return None
 
 
