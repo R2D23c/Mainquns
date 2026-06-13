@@ -2012,33 +2012,15 @@ def run() -> int:
 
         log.info("UI install завершён успешно (логин + API-порт + импорт сессии)")
 
-        # ✅ install OK — юзер видит что машина готова, можно отключаться от
-        # RDP. Дальше прогрев идёт через HTTP API (warmup_api.py) и не
-        # требует desktop'а / pyautogui / ImageGrab.
-        count = _read_success_count()
-        if count < SUCCESS_NOTIFY_COUNT:
-            count += 1
-            _write_success_count(count)
-            try:
-                notify_ntfy(
-                    _ntfy_header() +
-                    f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}\n"
-                    f"Запускаю первый API-прогрев в фоне.\n"
-                    f"RDP можно отключать — дальше всё само.",
-                    title="warmup OK",
-                    priority="low",
-                    tags="white_check_mark",
-                )
-            except Exception:
-                pass
-
         # Ждём пока LS реально засветит новую сессию в /sessions catalog.
         # Mass Import dialog'у мало "закрылся" — LS-cloud sync доезжает с
         # задержкой. Без этого ожидания warmup_api спавнится через секунду,
         # сразу падает на find_session_by_name → ⚠️ false-error push.
-        # Поллинг работает ПОСЛЕ ✅ success push'а: оператор уже видел
-        # "RDP можно отключать", полл-цикл это HTTP-only и переживает
-        # disconnect RDP (та же категория что warmup_api).
+        # ✅ success push НАМЕРЕННО шлём ТОЛЬКО после успешного polling'а
+        # (см. ниже). Раньше отправляли сразу — но Mass Import может реально
+        # держать LS API 5-7 минут, и оператор получал "RDP можно отключать"
+        # за 6 минут до того как реально безопасно. Сейчас push идёт ровно
+        # в момент когда сессия в catalog'е, warmup_api готов стартануть.
         base_url_for_poll, _ = _parse_api_port_from_config(cfg)
         if not _wait_for_session_in_catalog(base_url_for_poll, session_name):
             poll_total_min = sum(_POST_IMPORT_POLL_SCHEDULE) // 60
@@ -2062,6 +2044,26 @@ def run() -> int:
             except Exception:
                 pass
             return 0
+
+        # ✅ install OK + сессия видна в /sessions — теперь честно сообщаем
+        # оператору что машина готова и RDP можно отключать. Сразу следом
+        # спавним warmup_api в фоне.
+        count = _read_success_count()
+        if count < SUCCESS_NOTIFY_COUNT:
+            count += 1
+            _write_success_count(count)
+            try:
+                notify_ntfy(
+                    _ntfy_header() +
+                    f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}\n"
+                    f"Сессия видна в LS catalog, запускаю warmup_api в фоне.\n"
+                    f"RDP можно отключать — дальше всё само.",
+                    title="warmup OK",
+                    priority="low",
+                    tags="white_check_mark",
+                )
+            except Exception:
+                pass
 
         # Сразу запускаем warmup_api.py как DETACHED subprocess. Он:
         # - не нуждается в desktop'е (HTTP-only, на 127.0.0.1:36555)
