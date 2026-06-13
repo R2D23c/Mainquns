@@ -174,21 +174,17 @@ def grab_screen_bgr() -> np.ndarray | None:
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-def find_template(name: str, confidence: float) -> tuple[int, int] | None:
-    """Возвращает центр найденного шаблона на экране или None."""
+def _try_match_single(name: str, screen: np.ndarray, confidence: float) -> tuple[int, int] | None:
+    """Внутренний хелпер: один template (`{name}.png`) vs screen.
+    Возвращает координаты центра матча или None если confidence ниже
+    порога / файла нет."""
     tpl_path = TEMPLATES_DIR / f"{name}.png"
     if not tpl_path.exists():
-        log.error("шаблон не найден: %s", tpl_path)
         return None
-
     tpl = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
     if tpl is None:
         log.error("не удалось прочитать %s", tpl_path)
         return None
-
-    screen = grab_screen_bgr()
-    if screen is None:
-        return None  # RDP отключена, screen grab упал → шаблон «не найден»
     res = cv2.matchTemplate(screen, tpl, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
     log.info("match %s: confidence=%.3f", name, max_val)
@@ -196,6 +192,40 @@ def find_template(name: str, confidence: float) -> tuple[int, int] | None:
         return None
     h, w = tpl.shape[:2]
     return (max_loc[0] + w // 2, max_loc[1] + h // 2)
+
+
+def find_template(name: str, confidence: float) -> tuple[int, int] | None:
+    """Возвращает центр найденного шаблона на экране или None.
+
+    FHD-fallback: если primary `{name}.png` не сматчил, пробует
+    `{name}_fhd.png` (нарезка с VPS где LS рендерит UI в режиме 0.75x
+    от оригинального templates). Файл `_fhd.png` опционален — если его
+    нет, behavior identical to legacy. На VPS с нормальным рендером
+    primary template даёт 0.99 → fallback не активируется. На VPS с
+    "FHD-render" primary даёт 0.5-0.7 (ниже порога) → fallback пробует
+    `_fhd` template который снят с такой же VPS → должен дать 0.99.
+
+    Threshold не меняется (остаётся 0.80). Никакого false-positive risk
+    из понижения порога — мы вместо этого подкладываем правильный
+    template под рендер."""
+    tpl_path = TEMPLATES_DIR / f"{name}.png"
+    if not tpl_path.exists():
+        log.error("шаблон не найден: %s", tpl_path)
+        return None
+
+    screen = grab_screen_bgr()
+    if screen is None:
+        return None  # RDP отключена, screen grab упал → шаблон «не найден»
+
+    pt = _try_match_single(name, screen, confidence)
+    if pt is not None:
+        return pt
+    # Fallback: пробуем FHD-нарезку если она есть для этого template'а
+    fhd_path = TEMPLATES_DIR / f"{name}_fhd.png"
+    if fhd_path.exists():
+        log.info("match %s primary не прошёл, пробую %s_fhd", name, name)
+        return _try_match_single(f"{name}_fhd", screen, confidence)
+    return None
 
 
 def wait_for(name: str, confidence: float, timeout: float) -> tuple[int, int]:
@@ -855,34 +885,17 @@ def _dismiss_firewall_alert() -> bool:
     return True
 
 
-def _match_template_in_region(
-    name: str, confidence: float,
-    left: int, top: int, right: int, bottom: int,
-    scales: tuple[float, ...] = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0),
+def _multiscale_match_in_region(
+    name: str, region: np.ndarray, region_w: int, region_h: int,
+    left: int, top: int, confidence: float,
+    scales: tuple[float, ...],
 ) -> tuple[int, int] | None:
-    """Template-matching внутри прямоугольника экрана с перебором масштабов.
-    cv2 не делает scale-invariant matching, поэтому если шаблон сохранён при
-    одном DPI, а ищем при другом — нужно подставить размер. Возвращает
-    абсолютные координаты центра лучшего матча, либо None."""
+    """Внутренний хелпер: multiscale match одного template'а в готовом region.
+    Возвращает абсолютные координаты центра или None."""
     tpl_path = TEMPLATES_DIR / f"{name}.png"
     tpl_orig = cv2.imread(str(tpl_path), cv2.IMREAD_COLOR)
     if tpl_orig is None:
-        log.error("шаблон %s не читается", tpl_path)
         return None
-    region_w = right - left
-    region_h = bottom - top
-    if region_w <= 0 or region_h <= 0:
-        return None
-    try:
-        img = ImageGrab.grab(bbox=(left, top, right, bottom))
-    except OSError as e:
-        # RDP отключена → нет attached desktop'а → ImageGrab падает.
-        # Возвращаем None как «шаблон не найден» — caller (poll-loop)
-        # перевызовет нас в следующей итерации и при reconnect RDP
-        # template-matching возобновится без перезапуска warmup.py.
-        log.warning("_match_template_in_region(%s): %s — пропуск", name, e)
-        return None
-    region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
     best_val = 0.0
     best_loc = (0, 0)
@@ -908,6 +921,52 @@ def _match_template_in_region(
         return None
     return (left + best_loc[0] + best_size[0] // 2,
             top + best_loc[1] + best_size[1] // 2)
+
+
+def _match_template_in_region(
+    name: str, confidence: float,
+    left: int, top: int, right: int, bottom: int,
+    scales: tuple[float, ...] = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0),
+) -> tuple[int, int] | None:
+    """Template-matching внутри прямоугольника экрана с перебором масштабов.
+    cv2 не делает scale-invariant matching, поэтому если шаблон сохранён при
+    одном DPI, а ищем при другом — нужно подставить размер. Возвращает
+    абсолютные координаты центра лучшего матча, либо None.
+
+    FHD-fallback: если primary `{name}.png` не сматчил, пробует
+    `{name}_fhd.png` (нарезка с VPS где LS рендерит UI в режиме 0.75x).
+    Та же логика что в find_template — transparent для всех call sites.
+    Region-ограничение для FHD-варианта сохраняется такое же."""
+    tpl_path = TEMPLATES_DIR / f"{name}.png"
+    if not tpl_path.exists():
+        log.error("шаблон %s не читается", tpl_path)
+        return None
+    region_w = right - left
+    region_h = bottom - top
+    if region_w <= 0 or region_h <= 0:
+        return None
+    try:
+        img = ImageGrab.grab(bbox=(left, top, right, bottom))
+    except OSError as e:
+        # RDP отключена → нет attached desktop'а → ImageGrab падает.
+        # Возвращаем None как «шаблон не найден» — caller (poll-loop)
+        # перевызовет нас в следующей итерации и при reconnect RDP
+        # template-matching возобновится без перезапуска warmup.py.
+        log.warning("_match_template_in_region(%s): %s — пропуск", name, e)
+        return None
+    region = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+    pt = _multiscale_match_in_region(
+        name, region, region_w, region_h, left, top, confidence, scales)
+    if pt is not None:
+        return pt
+    # Fallback: FHD-нарезка
+    fhd_path = TEMPLATES_DIR / f"{name}_fhd.png"
+    if fhd_path.exists():
+        log.info("match %s primary не прошёл, пробую %s_fhd в том же region", name, name)
+        return _multiscale_match_in_region(
+            f"{name}_fhd", region, region_w, region_h, left, top, confidence, scales)
+    return None
 
 
 def _click_allow_access_template() -> bool:
