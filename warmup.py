@@ -2034,9 +2034,18 @@ def run() -> int:
                     f"сессия {session_name!r} не появилась в LS /sessions "
                     f"за ~{poll_total_min} мин после Mass Import.\n"
                     f"warmup_api НЕ стартован. Следующий 45-мин tick "
-                    f"попробует через run_api.bat сам.\n"
-                    f"Если повторится — проверь машину руками "
-                    f"(возможно нужен manual re-import через LS GUI).",
+                    f"попробует через run_api.bat сам — возможно к тому "
+                    f"моменту LS догонит cloud sync.\n\n"
+                    f"Если ⚠️ повторится через 45 мин — RDP в машину и "
+                    f"выполни в PowerShell:\n"
+                    f"---\n"
+                    f"taskkill /f /im \"Linken Sphere 2.exe\" /t 2>$null; "
+                    f"taskkill /f /im python.exe /t 2>$null; "
+                    f"cd C:\\warmup; .\\freshstart.bat; "
+                    f"schtasks /run /tn LinkenSphereWarmup\n"
+                    f"---\n"
+                    f"Это убьёт LS+python, чистит state, гонит установку "
+                    f"с нуля. Через ~10 мин придёт следующий ✅ или ⚠️.",
                     title="warmup pending (ui)",
                     priority="high",
                     tags="warning",
@@ -2108,7 +2117,13 @@ def run() -> int:
             notify_ntfy(
                 _ntfy_header() +
                 f"error: {exc}\n\n"
-                f"tail:\n" + "".join(tail_lines)
+                f"tail:\n" + "".join(tail_lines) +
+                f"\n---\nfix: RDP в машину и в PowerShell:\n"
+                f"taskkill /f /im \"Linken Sphere 2.exe\" /t 2>$null; "
+                f"taskkill /f /im python.exe /t 2>$null; "
+                f"cd C:\\warmup; .\\freshstart.bat; "
+                f"schtasks /run /tn LinkenSphereWarmup\n"
+                f"(убивает LS+python, чистит state, гонит UI install с нуля)"
             )
         except Exception:
             pass
