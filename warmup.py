@@ -1956,8 +1956,27 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) 
     handle_open_file_dialog(str(xlsx), cfg)
     screenshot("D2_file_chosen", shots)
 
-    # 4. IMPORT
-    click("import_button", cfg)
+    # 4. IMPORT — но кнопка появляется ТОЛЬКО после того как LS
+    # прокрутит pre-import cloud sync (валидация xlsx fingerprint'а
+    # с ls.app, генерация preview row). На быстрых VPS = секунды,
+    # на медленных = 5-7 минут. До этого момента диалог стоит в виде
+    # "Mass creation" с двумя BROWSE FILE без IMPORT кнопки, либо
+    # transitioning state. Дефолтный wait_seconds=30с слишком мал —
+    # на медленных VPS warmup.py умирал TimeoutError'ом ровно когда
+    # LS вот-вот собирался показать IMPORT (наблюдалось .154, .175
+    # 16.06.2026 — preview появлялся через 5+ мин, к тому моменту
+    # warmup.py уже отрапортовал ⚠️ и оператор делал manual recovery).
+    #
+    # 600с (10 мин) даёт LS pre-import sync завершиться. На fast VPS
+    # IMPORT кнопка matchится мгновенно — wait_for выходит сразу,
+    # никакой задержки. На slow VPS — терпеливо ждём.
+    conf = cfg.getfloat("matching", "confidence")
+    log.info("жду IMPORT кнопку (до 10 мин — LS делает pre-import cloud sync xlsx fingerprint'а)…")
+    ib_x, ib_y = wait_for("import_button", conf, 600.0)
+    log.info("click import_button@(%d,%d)", ib_x, ib_y)
+    _record_click(ib_x, ib_y, "import_button")
+    pyautogui.click(ib_x, ib_y)
+    time.sleep(cfg.getfloat("matching", "step_delay"))
     log.info("нажат IMPORT, жду создания сессии (10с) с попутным дисмиссом firewall…")
     # импорт может дёрнуть сеть → возможен firewall alert; ждём 10с и чистим его
     _wait_for_firewall_alert(10.0)
