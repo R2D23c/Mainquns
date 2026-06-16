@@ -405,3 +405,365 @@ GET /sessions — это cloud sync. Когда диагностируешь "с
 когда что-то отвалится и надо понять *зачем* вообще такая логика
 была сделана. Не stop на "fix bug" — пиши контекст, наблюдение,
 trade-off'ы, что отвергли и почему.
+
+## Сессия 16 июня 2026 — slow-VPS timeouts + retry'ы + специфичные recovery push'и
+
+### Полный flow и где сейчас сидят timeout'ы
+
+```
+[OPERATOR]
+   │ iex setup.ps1 + 3 env vars
+   ▼
+[SETUP] (10-15 мин)
+   │ Step 0: TLS 1.2 + git/python install
+   │ Step 1: clone repo
+   │ Step 2: install.bat (LS Inno Setup 150MB silent)
+   │ Step 3: credentials.ini в .gitignore
+   │ Step 4: firewall preauth + AutoAdminLogon registry
+   │ Step 4.5: NoAutoRebootWithLoggedOnUsers, lockoutthreshold=0
+   │ Step 5: schedule_hourly.ps1 → LinkenSphereWarmup (Time 45м + AtStartup PT2M)
+   │                             → LsWatchdog (5м + AtStartup PT3M)
+   ▼
+[UI INSTALL] warmup.py (~26-37 мин, до ~50 мин worst-case на slow VPS)
+   │
+   ├─ ensure_LS_running              ← launch_wait_seconds = 600с (config)
+   │  └─ poll loop scanning firewall/wizard/three_dots/auth (0.5с sleep)
+   │  └─ FHD-fallback на каждом template'е
+   │
+   ├─ login_if_needed                ← three_dots wait 240с (hardcoded)
+   │  ├─ check three_dots (already signed in?)
+   │  ├─ click sign_in
+   │  ├─ wait three_dots после SIGN IN (240с)
+   │  └─ если timeout → ⚠️ "three_dots не появился"
+   │
+   ├─ activate_api_port_if_needed     ← wait_seconds=30с (config)
+   │  ├─ click settings_gear (region-constrained)
+   │  ├─ scroll до API port input
+   │  ├─ type port + Enter
+   │  └─ запись .api_activated
+   │
+   └─ import_session_if_needed
+      ├─ click multiple_button       ← wait_seconds=30с
+      ├─ click browse_file (right)   ← region-constrained, _wait_seconds=30с
+      ├─ handle_open_file_dialog
+      │   ├─ wait dialog up to 30с
+      │   ├─ Alt+N → File name field
+      │   ├─ Ctrl+A + Delete
+      │   ├─ "{path}" char-by-char 120мс/char
+      │   ├─ 7с settle
+      │   └─ Enter
+      ├─ wait_for("import_button")   ← 600с! (pre-import cloud sync ls.app)
+      ├─ click import_button
+      ├─ _wait_for_firewall_alert(10с)
+      ├─ запись SESSION_IMPORTED_FLAG (имя сессии в .session_imported)
+      ├─ _wait_for_session_in_catalog ← polling [10,30,60,120,240] = 460с
+      │  └─ если не появилась → ⚠️ "session не появилась" + EXIT (НЕ спавним warmup_api)
+      ├─ ✅ "UI install OK 1/2, RDP можно отключать" push
+      └─ spawn warmup_api.py DETACHED
+   ▼
+[CYCLES] warmup_api.py — каждые 45 мин Task Scheduler
+   │
+   ├─ ping API                       ← 5 retry с backoff [5,10,15,20]с = ~50с budget
+   │  └─ если все 5 fail → ⚠️ "LS API down" + EXIT
+   │
+   ├─ signin                          ← http_timeout=30с
+   │  └─ HTTP 400 "Already signed in" — нормально, продолжаем
+   │
+   ├─ find_session_by_name/uuid
+   │  └─ если коллизия имён → ⚠️ "коллизия + удали лишнее"
+   │
+   ├─ load url_pool, generate chunks (7 чанков по 14 URL)
+   │
+   ├─ for chunk in chunks:
+   │  ├─ pause_between_chunks=10с
+   │  ├─ POST /sessions/start_warmup  ← http_timeout=30с
+   │  │   └─ 409 conflict → 9-step pyramid backoff [10,30,60,120,240,360,force_stop,360,480]
+   │  │   └─ connection refused → Layer 4 self-recovery (kill+launch LS, max 2/chunk)
+   │  ├─ poll status каждые 5с до poll_timeout=600с
+   │  └─ освобождение сессии stop()
+   │
+   ├─ update .warmup_count
+   ├─ ⚙️ push "chunks N/M, progress X%/total"  ← priority=low
+   │
+   └─ если .warmup_count >= .warmup_target:
+      ├─ schtasks /change /tn LinkenSphereWarmup /disable
+      ├─ count_session_cookies (XLSX export)
+      └─ 🎉 push "warmup all done"  ← priority=HIGH (звуковой!)
+```
+
+### Где и почему каждый timeout
+
+| Параметр | Значение | Файл | Покрывает |
+|---|---|---|---|
+| `launch_wait_seconds` | 600с | config.ini | LS Electron cold start + первый экран на slow VPS |
+| `wait_seconds` | 30с | config.ini | Стандартные UI клики (gear, multiple, browse) |
+| `confidence` | 0.80 | config.ini | Template matching threshold |
+| `three_dots wait` | 240с | hardcoded | Sign-in redirect + auth state load |
+| `import_button wait` | 600с | hardcoded warmup.py | Pre-import cloud sync xlsx fingerprint'а ls.app |
+| `_POST_IMPORT_POLL_SCHEDULE` | [10,30,60,120,240]=460с | hardcoded warmup.py | Post-import cloud sync (sessions catalog update) |
+| `pause_between_chunks_seconds` | 10с | config.ini | LS отдыхает между чанками |
+| `poll_interval_seconds` | 5с | config.ini | Полл состояния warmup'а |
+| `poll_timeout_seconds` | 600с | config.ini | Поллинг одного чанка |
+| `http_timeout_seconds` | 30с | config.ini | Сетевой timeout всех API-вызовов |
+| `ping_backoffs` | [5,10,15,20]=50с | hardcoded warmup_api.py | Initial ping retry на transient LS hiccup |
+| 9-step pyramid | [10,30,60,120,240,360,0,360,480]=1660с | warmup_api.py | 409 Session is used (multi-VPS контентоция) |
+| Layer 4 self-recovery | 2/chunk max | warmup_api.py | Connection refused mid-cycle |
+| Watchdog STUCK_THRESHOLD | 75 мин | ls_watchdog.py | Main task завис (не тикала) |
+| Watchdog UPTIME_GUARD | 10 мин | ls_watchdog.py | Не лезть в первые 10 мин после boot |
+| Watchdog RESTART_THRESHOLD | 3 strikes × 5 мин = 15 мин | ls_watchdog.py | LS API down → kill + ls_launch.bat |
+| Watchdog AtStartup Delay | PT3M | schedule | LS из Startup folder + 2-3 мин на API |
+| LinkenSphereWarmup AtStartup Delay | PT2M | schedule | LS init после boot |
+| Task Scheduler Time interval | 45 мин | schedule | Между тиками цикла |
+| Anti-collision jitter | 0-120с | warmup_api.py | Парк 8+ VPS старт одновременно |
+
+### Все push notifications — где, когда, priority
+
+| Push | Tag | Priority | Когда (warmup.py / warmup_api / watchdog) |
+|---|---|---|---|
+| ✅ "UI install OK 1/2" | check | low | warmup.py: после polling /sessions OK |
+| ⚠️ "session не появилась в /sessions" | warning | high | warmup.py: polling timeout |
+| ⚠️ "warmup failed (ui)" generic | warning | high | warmup.py: любая UI ошибка |
+| ⚠️ "warmup failed (ui)" import_button | warning | high | warmup.py: спец-recovery с .session_imported инструкцией |
+| ⚙️ "warmup cycle X/N progress" | gear | low | warmup_api.py: каждый успешный цикл |
+| ⚠️ "LS API down" | warning | high | warmup_api.py: 5 ping retry fail |
+| ⚠️ "cycle paused — 409 lock" | hourglass | low | warmup_api.py: 9-step pyramid exhausted |
+| ⚠️ "warmup failed (api)" generic | warning | high | warmup_api.py: остальное |
+| 🔧 "LS recovered" | gear | low | warmup_api.py Layer 4 / watchdog Layer 5: LS reborn |
+| ⚠️ "LS recovery failed" | warning | high | warmup_api.py Layer 4 / watchdog Layer 5: kill+launch не помог |
+| 🔧 "force-trigger main task" | gear | low | watchdog Layer 6: stuck-detection активирован |
+| 🔄 "boot detected" | refresh | low | notify_boot.py: первый запуск после reboot |
+| 🎉 "warmup all done" | tada | **HIGH (звук!)** | warmup_api.py: target reached, cookies готовы |
+
+### Категоризация ошибок в warmup_api error handler
+
+Три ветки кода в `except Exception` в run():
+
+**1. 409 conflict ("Session is used")**
+```python
+is_409 = "HTTP 409" in str(exc) and "Session is used" in str(exc)
+```
+→ priority=low, "cycle paused — next tick will retry". В 95% случаев другая VPS освободит lock к следующему 45-мин tick'у.
+
+**2. LS API down (initial ping после 5 retry'ев)**
+```python
+is_ping_down = "GET /sessions" in str(exc) and ("10061" in str(exc) or "refused" in str(exc).lower() or "сеть/таймаут" in str(exc))
+```
+→ priority=high, "LS API down — auto-recovery via watchdog". Полная инструкция оператору с командами для RDP-recovery.
+
+**3. Всё остальное**
+→ priority=high, "warmup failed (api)" с tail логом.
+
+### Recovery push'и из warmup.py (UI install)
+
+Тоже три категории в `except Exception`:
+
+**1. import_button timeout (LS медленно делает pre-import cloud sync)**
+```python
+if "import_button" in str(exc):
+```
+→ Спец-инструкция: ручной клик IMPORT + `Set-Content .session_imported '<name>'` + `schtasks /run`. Имя сессии подставляется в команду из `.session_name` автоматически.
+
+**2. Polling /sessions timeout (post-import sync не доехал)**
+→ Спец push "warmup pending (ui)". Инструкция: подождать 45 мин или RDP + manual re-import.
+
+**3. Всё остальное (BROWSE FILE не найден, three_dots timeout, и т.д.)**
+→ Generic "warmup failed (ui)" с nuke-and-retry командой:
+```
+taskkill /f /im "Linken Sphere 2.exe" /t 2>$null;
+taskkill /f /im python.exe /t 2>$null;
+cd C:\warmup; .\freshstart.bat;
+schtasks /run /tn LinkenSphereWarmup
+```
+
+### 6 архитектурных слоёв — кто что покрывает (обновлено)
+
+```
+LAYER 6  Watchdog stuck detection: если main task не тикала >75 мин
+         → schtasks /run force-trigger. Защита от Time-trigger drift'а
+         после reboot.
+
+LAYER 5  Watchdog API ping (5 мин interval): 3 fail подряд (15 мин) →
+         kill LS + ls_launch.bat (CREATE_NO_WINDOW). Сам шлёт 🔧/⚠️ push.
+
+LAYER 4  warmup_api self-recovery: connection refused / timeout в цикле →
+         kill+launch LS + retry. Max 2 recoveries per chunk. На initial
+         ping НЕ применяется (Layer 4.5 — см. ниже).
+
+LAYER 4.5 (новое 16.06.2026) initial ping retry: 5 попыток с backoff
+         [5,10,15,20]с (~50с). На transient LS hiccup (Chromium GC,
+         cloud sync) тихо переживаем. Если все 5 fail → ⚠️ "LS API down"
+         с детальной инструкцией.
+
+LAYER 3  9-step retry pyramid для 409 conflict: 10/30/60/120/240/360/
+         force_stop/360/480+nuclear. Покрывает 8+ VPS на одном LS аккаунте.
+
+LAYER 2  Task Scheduler: Time (45 мин) + AtStartup (Delay PT2M).
+         MultipleInstances=IgnoreNew защищает от overlap.
+
+LAYER 1  Boot recovery: AutoAdminLogon → Startup folder ls_launch.bat
+         (с правильной cwd /D для evo://) → notify_boot.py → 🔄 push.
+
+LAYER 0  Preventive: NoAutoRebootWithLoggedOnUsers, lockoutthreshold=0,
+         firewall preauth ВСЕХ LS .exe.
+```
+
+### Worst-case полный pipeline (slow 2c/4gb VPS, FHD-render, парк 10+ VPS)
+
+| Фаза | Worst case |
+|---|---|
+| UI install (warmup.py) | ~34 мин |
+| Первый warmup_api cycle (realistic worst) | ~50 мин |
+| Initial ping retry budget | +50с на каждый cycle (мелочь) |
+| 4 последующих цикла × 37 мин + 8 мин gap | ~3 часа |
+| Финал (count cookies, push) | ~1 мин |
+| **Total для target=500 URL** | **~4-5 часов** |
+
+В архитектурном бюджете 3-9 часов. Worst-case с 409-pyramid на каждом
+чанке всех циклов = теоретически 24+ часов, но в реальности не
+наблюдается.
+
+### Кейсы 13-16 июня 2026 (топ-10 эмпирически собранных)
+
+| ID | Симптом | Fix |
+|---|---|---|
+| F-01 | Templates не матчатся на FHD-render VPS (best=0.4-0.7, scale=0.75) | _fhd templates + fallback в find_template/_match_template_in_region/_find_template_box |
+| F-02 | Кнопка `multiple_button` имеет 2 разных crop'а в LS GUI | `multiple_button2_fhd.png` — альтернативный crop, нумерованный fallback в `_fhd_fallback_names` |
+| F-03 | Mass Import dialog висит 4-6 мин после клика IMPORT | polling /sessions [10,30,60,120,240]=460с в warmup.py |
+| F-04 | warmup_api спавнится через 1с после Import, не находит сессию | polling /sessions перед spawn'ом + ✅ push после polling, не до |
+| F-05 | LS открывает Mass Creation (не Mass Import) — IMPORT кнопка появляется через 5+ мин | wait_for("import_button") timeout=600с (вместо 30с) |
+| F-06 | Manual recovery после import_button timeout создавал дубль сессии | В push'е: `Set-Content .session_imported '<name>'` перед `schtasks /run` |
+| F-07 | LS Electron cold start на slow VPS = 7-10 мин | launch_wait_seconds 240→600 в config.ini |
+| F-08 | Wizard NEXT_STEP кликался прямо у timeout deadline'а (12с до конца) | launch_wait_seconds 600с покрывает + клик переживает |
+| F-09 | Transient LS hiccup на initial ping → ⚠️ false push | 5 retry с backoff [5,10,15,20]с (~50с) + спец "LS API down" push |
+| F-10 | LS умерла mid-cycle, Layer 4 recovery не помог | Layer 5 watchdog подхватит за 15 мин, ИЛИ manual ls_launch.bat |
+| F-11 | "Mass creation" с двумя BROWSE FILE vs "Mass import" с одним | warmup.py кликает правую BROWSE FILE (XLSX panel) — LS сам трансформирует Creation→Import при выборе XLSX |
+| F-12 | "коллизия имён: 2 сессии с одним именем" | Manual: удалить дубль в LS GUI + не забыть `Set-Content .session_imported` перед `schtasks /run` |
+
+### Дисциплина оператора (критично!)
+
+**1. RDP — только через сохранённый 1440p `.rdp` файл**
+В mstsc → Display tab → Display configuration slider → **2560 by 1440 pixels**. Сохранить как файл. Использовать ВСЕГДА. На FHD-physical мониторе RDP-клиент рендерит downscaled — но VPS-сторона честно отдаёт 1440p (`Get-CimInstance Win32_VideoController` покажет 2560x1440 для Microsoft Remote Display Adapter).
+
+**2. Отключение от RDP — ТОЛЬКО ✕ окном (disconnect)**
+- ✅ Close ✕ окна → disconnect, session живёт, LS продолжает работать
+- ❌ Start → User icon → Sign out / Log off → **kill всех user процессов** включая LS, watchdog подберёт за 15 мин но это false-alarm push'и
+- ❌ Restart / Shutdown через Start menu → reboot, Layer 1 recovery подымет, но 🔄 push прилетит
+
+**3. Что делать когда приходит ⚠️ push**
+- Прочитать **fix-блок** в самом push'е — там команды для копипасты
+- Если "LS API down" → как правило ls_watchdog Layer 5 сам разрулит за 15 мин, можешь ждать
+- Если "import_button" → ручной IMPORT + 2 PowerShell команды из push'а
+- Если generic "warmup failed" → стандартный nuke-and-retry из push'а
+- Если **повторяется** на одной и той же машине → VPS нестабильная, замени
+
+**4. На новую VPS — всегда подтягивать свежий код**
+```powershell
+cd C:\warmup
+git pull
+```
+Машины установленные до коммита X живут на снапшоте кода без коммита X. Если оператор не делает `git pull`, новые фиксы на старых машинах не работают. Это **намеренно** (минимизация неожиданных регрессий), но требует дисциплины.
+
+### State-файлы (полная таблица v3, обновлена)
+
+| Файл | Содержимое | Когда пишется | Когда читается |
+|---|---|---|---|
+| `credentials.ini` | email/password | install.bat (operator input) | warmup.py login_if_needed, warmup_api signin |
+| `.python_cmd` | "C:\\Program Files\\Python312\\python.exe" в кавычках | setup.ps1 (fix_pycmd.bat) | ls_launch.bat, run_api.bat |
+| `.session_name` | CL-XXXXXXXX | warmup.py first run (generate_session_name) | warmup.py, warmup_api |
+| `.session_imported` | имя сессии (НЕ UUID) | warmup.py после успешного IMPORT click | run_api.bat (dispatch), warmup_api (find_session_by_name) |
+| `.api_activated` | 36555 | warmup.py после успешной API port activation | warmup.py (skip if exists) |
+| `.warmup_target` | random(300, 500) | warmup_api первый запуск | warmup_api каждый цикл |
+| `.warmup_count` | int (накопленный URL count) | warmup_api после каждого успешного цикла | warmup_api каждый цикл |
+| `.warmup_started_at` | unix timestamp | вместе с .warmup_target | warmup_api финальный 🎉 push |
+| `.notified_done` | пустой файл | warmup_api когда target reached | warmup_api (skip notification если есть), watchdog (self-disable если есть) |
+| `.last_boot` | Win FileTime | каждый запуск notify_boot.py | notify_boot.py для skip-same-boot |
+| `.watchdog_fail_count` | int 0..3 | watchdog при API ❌ | watchdog для restart-threshold |
+| `.wizards_done` | пустой | оператор вручную ИЛИ setup quickstart.ps1 | warmup.py `_dismiss_customize_wizard_step` (если есть — пропускаем wizard scan) |
+
+### Логи (полная таблица v3)
+
+| Файл | Что пишет | Когда смотреть |
+|---|---|---|
+| `warmup.log` | UI install фазы, template matching scores | После ⚠️ UI errors, для диагностики matching'а |
+| `warmup_api.log` | API циклы, signin, ping, chunks, 409 retries | Для текущего цикла прогрева, общая видимость |
+| `watchdog.log` | 5-мин ping'и LS, recovery actions | Если LS постоянно умирает или не подымается |
+| `notify_boot.log` | Boot detection events | Если 🔄 push не приходит после reboot |
+
+### CLI-команды для оператора (cheat sheet)
+
+```powershell
+# Проверка где LS / что слушает порт
+Get-Process "Linken Sphere 2" -EA SilentlyContinue | Format-Table Id, StartTime, CPU
+netstat -ano | findstr 36555
+Test-NetConnection 127.0.0.1 -Port 36555
+
+# Проверка sessions в LS catalog
+curl.exe -s http://127.0.0.1:36555/sessions | ConvertFrom-Json | Select name, status, uuid | Format-Table
+
+# Проверка resolution VPS (для FHD vs 2K диагностики)
+Get-CimInstance Win32_VideoController | Select Name, CurrentHorizontalResolution, CurrentVerticalResolution
+python -c "import pyautogui; print(pyautogui.size())"
+
+# Проверка ресурсов
+Get-Volume C | Format-Table DriveLetter, SizeRemaining, Size
+Get-CimInstance Win32_OperatingSystem | Select FreePhysicalMemory, TotalVisibleMemorySize
+
+# Stop процессов LS
+taskkill /f /im "Linken Sphere 2.exe" /t 2>$null
+Get-Process | Where Path -Like "*Linken Sphere*" | Stop-Process -Force -EA 0
+
+# Стандартный nuke-and-retry
+taskkill /f /im "Linken Sphere 2.exe" /t 2>$null; taskkill /f /im python.exe /t 2>$null; cd C:\warmup; .\freshstart.bat; schtasks /run /tn LinkenSphereWarmup
+
+# Поднять LS вручную (без freshstart!)
+cd C:\warmup
+.\ls_launch.bat
+Start-Sleep -Seconds 60
+Test-NetConnection 127.0.0.1 -Port 36555
+
+# Пнуть warmup_api без ожидания 45-мин tick'а
+schtasks /run /tn LinkenSphereWarmup
+
+# Запись .session_imported (для recovery после manual IMPORT)
+Set-Content C:\warmup\.session_imported 'CL-XXXXXXXX'
+
+# Запись .wizards_done (если оператор сам прокликал wizard)
+New-Item C:\warmup\.wizards_done -Force
+
+# Подтянуть свежий код пайплайна
+cd C:\warmup; git pull
+
+# Завершить таски (на crash-восстановление)
+schtasks /end /tn LinkenSphereWarmup 2>$null
+schtasks /end /tn LsWatchdog 2>$null
+# и обратно:
+schtasks /change /tn LinkenSphereWarmup /enable
+schtasks /change /tn LsWatchdog /enable
+
+# Streaming лога в realtime
+Get-Content C:\warmup\warmup.log -Tail 30 -Wait
+Get-Content C:\warmup\warmup_api.log -Tail 30 -Wait
+Get-Content C:\warmup\watchdog.log -Tail 30 -Wait
+```
+
+### Архитектурные правила для будущего меня (расширены)
+
+1. **НИКОГДА** не убирать FHD fallback из template matching функций. `_fhd_fallback_names` ловит и `{name}_fhd.png` и нумерованные альтернативы `{name}N_fhd.png` — это всё нужно. Защита от коллизий (с другими primary templates) уже встроена.
+
+2. **НИКОГДА** не делать `_fhd2.png` / `_fhdN.png` именования. Правильно: `{name}N_fhd.png` (число между именем и `_fhd` суффиксом).
+
+3. **НИКОГДА** не понижать threshold confidence без эмпирического обоснования. CLAUDE.md правило #2 строгое — снижение приводит к false positives. Если templates не матчатся — сначала добавлять FHD варианты, потом думать про threshold.
+
+4. **НИКОГДА** не сужать polling /sessions schedule [10,30,60,120,240]. Эмпирически проверено: poll #1 (10с) ловит на fast VPS, poll #5 (cumulative 7.5 мин) на slow.
+
+5. **НИКОГДА** не дёргать .session_imported в коде без понимания run_api.bat dispatch logic'и. Файл влияет на то, спавнится ли warmup.py (UI install) или warmup_api (cycle).
+
+6. **НИКОГДА** не менять порядок push timing'а в warmup.py: ✅ "RDP можно отключать" должен идти ПОСЛЕ polling /sessions OK, не до. Иначе оператор отключается до того как machine реально готова.
+
+7. **НИКОГДА** не делать ping retry budget больше 60-70с в warmup_api без анализа Task Scheduler tick'а. Worst-case timeout × retries должен влезать в 45-мин окно.
+
+8. **НИКОГДА** не дублировать push'и (Layer 4 ⚠️ + generic ⚠️ за тот же fail). Сейчас (16.06.2026) дубль есть в одном edge case (LS recovery failed + warmup failed api) — это уже отмечено как F-10, fix не закоммичен. Если делаешь touch там — объединяй в один push.
+
+9. **ВСЕГДА** пишет recovery-команду прямо в push, чтобы оператор копипастил без перехода в чат/доку. И **session_name подставляй** из `.session_name` файла, не оставляй placeholder.
+
+10. **ВСЕГДА** проверяй тайминги конфликтов когда меняешь любой timeout. Critical: 45-мин Task Scheduler tick, 75-мин watchdog stuck, 600с launch_wait, 600с import_button wait, 50с ping retry, 460с polling /sessions, 1660с 9-step pyramid.
