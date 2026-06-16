@@ -2114,16 +2114,39 @@ def run() -> int:
             if LOG_FILE.exists():
                 with LOG_FILE.open(encoding="utf-8", errors="ignore") as f:
                     tail_lines = f.readlines()[-15:]
+            # Спец-рекавери для import_button timeout. Симптом ложный —
+            # реально LS просто долго делает pre-import cloud sync xlsx
+            # fingerprint'а с ls.app. К моменту прихода push'а в LS GUI
+            # уже Mass Import dialog с preview row и активной IMPORT
+            # кнопкой — нужно просто кликнуть её руками + дёрнуть
+            # schtasks. Полный nuke-and-retry тут излишен и потеряет
+            # ~10 мин уже сделанной cloud верификации.
+            if "import_button" in str(exc):
+                fix_text = (
+                    "\n---\n"
+                    "fix (LS на этом этапе УЖЕ показал Mass Import с preview):\n"
+                    "1. RDP в машину\n"
+                    "2. В LS GUI кликни кнопку IMPORT вручную\n"
+                    "3. Дождись пока Mass Import dialog закроется (3-7 мин — это cloud sync)\n"
+                    "4. В PowerShell:\n"
+                    "     schtasks /run /tn LinkenSphereWarmup\n"
+                    "Это пнёт warmup_api без ожидания 45-мин tick'а и без\n"
+                    "потери уже сделанной работы. Полный freshstart НЕ нужен."
+                )
+            else:
+                fix_text = (
+                    "\n---\nfix: RDP в машину и в PowerShell:\n"
+                    "taskkill /f /im \"Linken Sphere 2.exe\" /t 2>$null; "
+                    "taskkill /f /im python.exe /t 2>$null; "
+                    "cd C:\\warmup; .\\freshstart.bat; "
+                    "schtasks /run /tn LinkenSphereWarmup\n"
+                    "(убивает LS+python, чистит state, гонит UI install с нуля)"
+                )
             notify_ntfy(
                 _ntfy_header() +
                 f"error: {exc}\n\n"
                 f"tail:\n" + "".join(tail_lines) +
-                f"\n---\nfix: RDP в машину и в PowerShell:\n"
-                f"taskkill /f /im \"Linken Sphere 2.exe\" /t 2>$null; "
-                f"taskkill /f /im python.exe /t 2>$null; "
-                f"cd C:\\warmup; .\\freshstart.bat; "
-                f"schtasks /run /tn LinkenSphereWarmup\n"
-                f"(убивает LS+python, чистит state, гонит UI install с нуля)"
+                fix_text
             )
         except Exception:
             pass
