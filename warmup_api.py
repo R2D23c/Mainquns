@@ -1122,8 +1122,37 @@ def run() -> int:
 
         client = ApiClient(base_url, http_timeout)
 
+        # Initial ping с 3 попытками + backoff 5с/10с (total ~15с).
+        # ЗАЧЕМ: warmup_api перезапускается каждые 45 минут через Task
+        # Scheduler. Первый ping LS API может попасть в момент когда LS
+        # только что закрыла предыдущий чанк и делает internal cleanup
+        # (Chromium GC, cloud sync с ls.app, ребалансировка renderer'ов).
+        # API thread занят на 2-5 секунд → connection refused / timeout.
+        # Один shot без retry давал false ⚠️ push: оператор RDP'нется,
+        # LS жива и работает, что за паника. Наблюдалось .27 02:45 UTC.
+        #
+        # 3 попытки × 15с покрывают любой разумный transient hiccup.
+        # Если за 15с LS не отозвалась совсем — это действительно
+        # проблема (Electron crash, logoff, OOM): тогда честный ⚠️ push,
+        # дальше Layer 5 watchdog подхватит за ~15 мин и поднимет LS.
         log.info("ping API %s …", base_url)
-        client.ping()
+        last_ping_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                client.ping()
+                if attempt > 1:
+                    log.info("ping API OK с %d-й попытки (transient hiccup переждали)", attempt)
+                last_ping_err = None
+                break
+            except Exception as e:
+                last_ping_err = e
+                if attempt < 3:
+                    backoff = 5 if attempt == 1 else 10
+                    log.info("ping API попытка %d/3 не прошла (%s) — backoff %dс",
+                             attempt, e, backoff)
+                    time.sleep(backoff)
+        if last_ping_err is not None:
+            raise last_ping_err
 
         log.info("signin как %s", email)
         client.signin(email, password)
@@ -1401,11 +1430,54 @@ def run() -> int:
         #   Не пробивает ночной режим телефона. На практике система сама
         #   поднимается на следующем 45-мин тике в 95% случаев (другая VPS
         #   к тому моменту освобождает лок).
+        # - LS API down на initial ping (после 3 retry'ев) — отдельная
+        #   категория: LS реально мёртвая (Electron crash / logoff / OOM).
+        #   Дать оператору понятное объяснение и точные команды для
+        #   ручного восстановления, плюс упомянуть что Layer 5 watchdog
+        #   её всё равно подхватит автоматически за ~15 мин.
         # - всё остальное (signin failed, network error, code crash) →
         #   priority="high", title="warmup failed". Зовёт человека.
         is_409 = "HTTP 409" in str(exc) and "Session is used" in str(exc)
+        is_ping_down = (
+            "GET /sessions" in str(exc) and
+            ("10061" in str(exc) or "refused" in str(exc).lower() or
+             "сеть/таймаут" in str(exc))
+        )
 
         hint = ""
+        if is_ping_down:
+            hint = (
+                "LS API на 127.0.0.1:36555 не отвечает после 3 retry'ев "
+                "(~15с total). Это значит LS реально мёртвая, не transient.\n\n"
+                "Причины:\n"
+                "- Electron crash (Chromium renderer убил parent на OOM/heavy GC)\n"
+                "- Оператор сделал Sign out / Log off в RDP вместо Close ✕\n"
+                "- Windows Update auto-reboot\n\n"
+                "Что произойдёт само:\n"
+                "- ls_watchdog (Layer 5) детектит 3 fail-ping подряд за 15 мин\n"
+                "- → kill зомби LS + ls_launch.bat → LS поднимется за ~30с\n"
+                "- Следующий 45-мин tick (~через 30 мин) подхватит цикл\n\n"
+                "Если хочешь ускорить (опционально):\n"
+                "1. RDP в машину через 1440p .rdp (НЕ другой mstsc)\n"
+                "2. Test-NetConnection 127.0.0.1 -Port 36555\n"
+                "3. Если TcpTestSucceeded=False → cd C:\\warmup; .\\ls_launch.bat\n"
+                "4. Подожди 60с: Test-NetConnection 127.0.0.1 -Port 36555\n"
+                "5. Когда True → schtasks /run /tn LinkenSphereWarmup\n"
+                "6. Закрой RDP ✕ окном — НЕ Sign out / Log off!\n\n"
+                "На будущее: если каждый день получаешь такой push на одной\n"
+                "и той же машине — LS на ней нестабильная (мало RAM, slow CPU),\n"
+                "стоит заменить VPS."
+            )
+            notify_ntfy(
+                _ntfy_header() +
+                f"reason: LS API не отвечает после 3 retry на ping\n" + hint + "\n"
+                f"tail:\n{tail}",
+                title="LS API down — auto-recovery via watchdog",
+                priority="high",
+                tags="warning",
+            )
+            return 1
+
         if is_409:
             _our_name = locals().get("session_name") or "(см. session: выше)"
             hint = (
