@@ -2122,16 +2122,29 @@ def run() -> int:
             # schtasks. Полный nuke-and-retry тут излишен и потеряет
             # ~10 мин уже сделанной cloud верификации.
             if "import_button" in str(exc):
+                # Подтягиваем имя сессии чтобы вставить в команду — оператор
+                # копипастит без подстановок. Если файла нет (странный случай)
+                # — пишем placeholder, пусть оператор сам заменит.
+                try:
+                    sess_for_fix = SESSION_NAME_FILE.read_text(
+                        encoding="utf-8").strip()
+                except Exception:
+                    sess_for_fix = "CL-XXXXXXXX"
                 fix_text = (
                     "\n---\n"
                     "fix (LS на этом этапе УЖЕ показал Mass Import с preview):\n"
                     "1. RDP в машину\n"
                     "2. В LS GUI кликни кнопку IMPORT вручную\n"
                     "3. Дождись пока Mass Import dialog закроется (3-7 мин — это cloud sync)\n"
-                    "4. В PowerShell:\n"
+                    "4. В PowerShell ОБЕ команды (порядок важен):\n"
+                    f"     Set-Content C:\\warmup\\.session_imported '{sess_for_fix}'\n"
                     "     schtasks /run /tn LinkenSphereWarmup\n"
-                    "Это пнёт warmup_api без ожидания 45-мин tick'а и без\n"
-                    "потери уже сделанной работы. Полный freshstart НЕ нужен."
+                    "Первая команда пишет флаг 'сессия импортирована' (warmup.py\n"
+                    "не успел его записать из-за timeout'а) — иначе run_api.bat\n"
+                    "увидит отсутствие флага и запустит warmup.py заново, что\n"
+                    "создаст ДУБЛЬ сессии в LS catalog → коллизия имён → ⚠️.\n"
+                    "Вторая команда пинает warmup_api без ожидания 45-мин tick'а.\n"
+                    "Полный freshstart НЕ нужен."
                 )
             else:
                 fix_text = (
