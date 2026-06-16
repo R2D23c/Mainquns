@@ -1122,34 +1122,44 @@ def run() -> int:
 
         client = ApiClient(base_url, http_timeout)
 
-        # Initial ping с 3 попытками + backoff 5с/10с (total ~15с).
+        # Initial ping с 5 попытками + backoff 5с/10с/15с/20с (~50с total).
         # ЗАЧЕМ: warmup_api перезапускается каждые 45 минут через Task
         # Scheduler. Первый ping LS API может попасть в момент когда LS
         # только что закрыла предыдущий чанк и делает internal cleanup
         # (Chromium GC, cloud sync с ls.app, ребалансировка renderer'ов).
-        # API thread занят на 2-5 секунд → connection refused / timeout.
+        # API thread занят на 2-30 секунд → connection refused / timeout.
         # Один shot без retry давал false ⚠️ push: оператор RDP'нется,
         # LS жива и работает, что за паника. Наблюдалось .27 02:45 UTC.
         #
-        # 3 попытки × 15с покрывают любой разумный transient hiccup.
-        # Если за 15с LS не отозвалась совсем — это действительно
-        # проблема (Electron crash, logoff, OOM): тогда честный ⚠️ push,
-        # дальше Layer 5 watchdog подхватит за ~15 мин и поднимет LS.
+        # 5 попыток × ~50с backoff (плюс время самого ping'а) покрывают
+        # любой разумный transient hiccup, включая тяжёлый GC и долгий
+        # cloud sync. Если за минуту LS не отозвалась совсем — это
+        # действительно LS down (Electron crash, logoff, OOM): тогда
+        # честный ⚠️ push, дальше Layer 5 watchdog подхватит за ~15 мин.
+        #
+        # Тайминги проверены — не конфликтуют ни с чем:
+        # - 45-мин Task Scheduler tick: +50с = ничтожно
+        # - warmup_api cycle: 26-37 мин + 50с = в норме укладывается
+        # - LS watchdog ping (каждые 5 мин): независимый процесс
+        # - http_timeout=30с * 5 worst-case = ~3 мин ещё в бюджете tick'а
         log.info("ping API %s …", base_url)
+        ping_backoffs = [5, 10, 15, 20]  # между attempt 1→2, 2→3, 3→4, 4→5
+        max_attempts = len(ping_backoffs) + 1  # = 5
         last_ping_err: Exception | None = None
-        for attempt in range(1, 4):
+        for attempt in range(1, max_attempts + 1):
             try:
                 client.ping()
                 if attempt > 1:
-                    log.info("ping API OK с %d-й попытки (transient hiccup переждали)", attempt)
+                    log.info("ping API OK с %d-й попытки (transient hiccup переждали)",
+                             attempt)
                 last_ping_err = None
                 break
             except Exception as e:
                 last_ping_err = e
-                if attempt < 3:
-                    backoff = 5 if attempt == 1 else 10
-                    log.info("ping API попытка %d/3 не прошла (%s) — backoff %dс",
-                             attempt, e, backoff)
+                if attempt < max_attempts:
+                    backoff = ping_backoffs[attempt - 1]
+                    log.info("ping API попытка %d/%d не прошла (%s) — backoff %dс",
+                             attempt, max_attempts, e, backoff)
                     time.sleep(backoff)
         if last_ping_err is not None:
             raise last_ping_err
@@ -1447,8 +1457,9 @@ def run() -> int:
         hint = ""
         if is_ping_down:
             hint = (
-                "LS API на 127.0.0.1:36555 не отвечает после 3 retry'ев "
-                "(~15с total). Это значит LS реально мёртвая, не transient.\n\n"
+                "LS API на 127.0.0.1:36555 не отвечает после 5 попыток "
+                "(~50с total backoff между ping'ами + время самих ping'ов).\n"
+                "Это значит LS реально мёртвая, не transient hiccup.\n\n"
                 "Причины:\n"
                 "- Electron crash (Chromium renderer убил parent на OOM/heavy GC)\n"
                 "- Оператор сделал Sign out / Log off в RDP вместо Close ✕\n"
@@ -1470,7 +1481,7 @@ def run() -> int:
             )
             notify_ntfy(
                 _ntfy_header() +
-                f"reason: LS API не отвечает после 3 retry на ping\n" + hint + "\n"
+                f"reason: LS API не отвечает после 5 retry на ping\n" + hint + "\n"
                 f"tail:\n{tail}",
                 title="LS API down — auto-recovery via watchdog",
                 priority="high",
