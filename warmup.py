@@ -458,9 +458,15 @@ def _machine_id() -> str:
 def _ntfy_header() -> str:
     """Единый префикс для всех ntfy-сообщений: session + machine.
     session ВСЕГДА первым — на телефоне его удобно ловить глазом,
-    т.к. имена машин (hostname) могут совпадать между VPS."""
+    т.к. имена машин (hostname) могут совпадать между VPS.
+    При нескольких профилях перечисляем все через запятую."""
     try:
-        sess = load_session_name()
+        names = [
+            ln.strip()
+            for ln in SESSION_NAME_FILE.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        sess = ", ".join(names) if names else "<unknown>"
     except Exception:
         sess = "<unknown>"
     return f"session: {sess}\nmachine: {_machine_id()}\n"
@@ -1641,26 +1647,34 @@ def _generate_session_name() -> str:
     return f"CL-{random.randint(10_000_000, 99_999_999)}"
 
 
-def load_session_name() -> str:
-    """Имя сессии этой машины. Источники, по приоритету:
-      1. .session_name (gitignored) — главный источник, генерируется автоматом
-         на первом запуске и больше не меняется.
+def load_session_names(count: int) -> list[str]:
+    """Имена профилей этой машины (1..N). Источники, по приоритету:
+      1. .session_name (gitignored) — главный источник. Мульти-профильный
+         формат: N строк, по имени на строку. Одна строка = легаси
+         одиночный профиль. Файл генерируется на первом запуске и больше
+         НЕ меняется — count из config.ini применяется только здесь,
+         на уже установленной машине он игнорируется.
       2. .session_imported (старый формат «только имя») — миграция со старых
          инсталляций, где имя жило там.
       3. credentials.ini [session] name — миграция со ещё более старого
          формата (когда юзер вписывал имя руками).
-      4. Если ничего нет — генерим новое CL-XXXXXXXX и пишем в .session_name.
-    Всегда возвращает непустую строку."""
+      4. Если ничего нет — генерим count новых CL-XXXXXXXX и пишем все
+         в .session_name (по строке на имя).
+    Всегда возвращает непустой список."""
     if SESSION_NAME_FILE.exists():
-        name = SESSION_NAME_FILE.read_text(encoding="utf-8").strip()
-        if name:
-            return name
+        names = [
+            ln.strip()
+            for ln in SESSION_NAME_FILE.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        if names:
+            return names
     if SESSION_IMPORTED_FLAG.exists():
         legacy = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
-        if legacy and "\t" not in legacy:
+        if legacy and "\t" not in legacy and "\n" not in legacy:
             log.info("миграция: имя сессии %r из .session_imported → .session_name", legacy)
             SESSION_NAME_FILE.write_text(legacy, encoding="utf-8")
-            return legacy
+            return [legacy]
     try:
         creds = load_credentials()
         if creds.has_section("session"):
@@ -1668,20 +1682,27 @@ def load_session_name() -> str:
             if legacy and legacy.lower() not in ("session name", "your session name", "yourname"):
                 log.info("миграция: имя сессии %r из credentials.ini → .session_name", legacy)
                 SESSION_NAME_FILE.write_text(legacy, encoding="utf-8")
-                return legacy
+                return [legacy]
     except FileNotFoundError:
         pass
-    name = _generate_session_name()
-    SESSION_NAME_FILE.write_text(name, encoding="utf-8")
-    log.info("сгенерировано новое имя сессии: %s", name)
-    return name
+    count = max(1, count)
+    names: list[str] = []
+    while len(names) < count:
+        n = _generate_session_name()
+        if n not in names:  # paranoia: 10^8 пространство, но дёшево проверить
+            names.append(n)
+    SESSION_NAME_FILE.write_text("\n".join(names) + "\n", encoding="utf-8")
+    log.info("сгенерированы имена %d профилей: %s", count, ", ".join(names))
+    return names
 
 
-def prepare_session_xlsx(session_name: str) -> Path:
-    """Если session_imports/<name>.xlsx уже есть — возвращаем путь.
-    Иначе генерим из session_imports/_template.xlsx с рандомным fingerprint
-    (см. session_template.build_session_xlsx). Возвращаем путь к готовому файлу."""
-    target = SESSION_IMPORTS_DIR / f"{session_name}.xlsx"
+def prepare_session_xlsx(session_names: list[str]) -> Path:
+    """Если session_imports/<first-name>.xlsx уже есть — возвращаем путь.
+    Иначе генерим из session_imports/_template.xlsx: одна xlsx, N строк
+    (строка 3, 4, …), у каждой свой рандомный fingerprint (см.
+    session_template.build_sessions_xlsx). Имя файла — по первому профилю,
+    чтобы freshstart.bat находил его wildcard'ом CL-*.xlsx."""
+    target = SESSION_IMPORTS_DIR / f"{session_names[0]}.xlsx"
     if target.exists():
         return target
     template = SESSION_IMPORTS_DIR / "_template.xlsx"
@@ -1690,9 +1711,10 @@ def prepare_session_xlsx(session_name: str) -> Path:
             f"не найден шаблон импорта сессии: {template}. "
             f"Должен лежать в репозитории."
         )
-    from session_template import build_session_xlsx
-    build_session_xlsx(template, target, session_name)
-    log.info("создан xlsx сессии: %s (A3=%s)", target, session_name)
+    from session_template import build_sessions_xlsx
+    build_sessions_xlsx(template, target, session_names)
+    log.info("создан xlsx на %d профилей: %s (%s)",
+             len(session_names), target, ", ".join(session_names))
     return target
 
 
@@ -1749,10 +1771,10 @@ def _check_api_port_alive(base_url: str) -> bool:
 _POST_IMPORT_POLL_SCHEDULE = [10, 30, 60, 120, 240]
 
 
-def _session_visible_in_catalog(base_url: str, session_name: str) -> bool:
-    """GET /sessions → ищем имя в массиве. True если найдена.
-    Любая сетевая ошибка / 4xx / 5xx считается за «не найдена» — следующая
-    попытка поллинга разрулит."""
+def _sessions_missing_in_catalog(base_url: str, session_names: list[str]) -> list[str]:
+    """GET /sessions → каких имён из session_names ещё НЕТ в каталоге.
+    Пустой список = все найдены. Любая сетевая ошибка / 4xx / 5xx
+    считается за «никого не нашли» — следующая попытка поллинга разрулит."""
     import urllib.request
     try:
         req = urllib.request.Request(
@@ -1760,32 +1782,37 @@ def _session_visible_in_catalog(base_url: str, session_name: str) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="ignore"))
         if not isinstance(data, list):
-            return False
-        return any(
-            isinstance(s, dict) and s.get("name") == session_name
-            for s in data
-        )
+            return list(session_names)
+        present = {
+            s.get("name") for s in data
+            if isinstance(s, dict) and s.get("name")
+        }
+        return [n for n in session_names if n not in present]
     except Exception as e:
-        log.info("poll /sessions: запрос упал (%s) — считаем «не найдена»", e)
-        return False
+        log.info("poll /sessions: запрос упал (%s) — считаем «не найдены»", e)
+        return list(session_names)
 
 
-def _wait_for_session_in_catalog(base_url: str, session_name: str) -> bool:
-    """Поллим /sessions до появления сессии или истечения расписания.
-    True = нашлась (warmup_api спавнить), False = не нашлась (⚠️ push,
+def _wait_for_session_in_catalog(base_url: str, session_names: list[str]) -> bool:
+    """Поллим /sessions до появления ВСЕХ профилей или истечения расписания.
+    Mass Import создаёт N сессий одним махом, но cloud sync не атомарен —
+    имена могут доезжать в catalog по одному. True = все нашлись
+    (warmup_api спавнить), False = хоть одна не нашлась (⚠️ push,
     НЕ спавнить, отдать следующему 45-мин tick'у)."""
     total = 0
+    missing = list(session_names)
     for i, delay in enumerate(_POST_IMPORT_POLL_SCHEDULE, 1):
         time.sleep(delay)
         total += delay
-        if _session_visible_in_catalog(base_url, session_name):
+        missing = _sessions_missing_in_catalog(base_url, session_names)
+        if not missing:
             log.info(
-                "poll #%d: сессия %r видна в /sessions через ~%dс после import",
-                i, session_name, total)
+                "poll #%d: все %d профилей видны в /sessions через ~%dс после import",
+                i, len(session_names), total)
             return True
         log.info(
-            "poll #%d/%d: сессия %r ещё не видна (cum %dс) — продолжаю ждать",
-            i, len(_POST_IMPORT_POLL_SCHEDULE), session_name, total)
+            "poll #%d/%d: ещё не видны %s (cum %dс) — продолжаю ждать",
+            i, len(_POST_IMPORT_POLL_SCHEDULE), ", ".join(missing), total)
     return False
 
 
@@ -1927,20 +1954,30 @@ def activate_api_port_if_needed(cfg: configparser.ConfigParser) -> None:
     log.info("API-порт %d активирован, флаг записан", port)
 
 
-def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) -> None:
-    """Первый запуск на машине: импортит сессию из session_imports/<name>.xlsx
-    через MULTIPLE → BROWSE FILE (правая) → диалог → IMPORT. Дальше пропускается."""
+def import_session_if_needed(cfg: configparser.ConfigParser, session_names: list[str]) -> None:
+    """Первый запуск на машине: импортит ВСЕ профили одной xlsx
+    (session_imports/<first-name>.xlsx, N строк) через MULTIPLE →
+    BROWSE FILE (правая) → диалог → IMPORT. UI-клики идентичны
+    одиночному импорту — Mass Import сам создаёт по сессии на строку.
+    Дальше пропускается."""
     if SESSION_IMPORTED_FLAG.exists():
-        prev = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
-        if prev == session_name:
-            log.info("сессия %r уже импортирована ранее — пропуск импорта", session_name)
+        prev_names = [
+            ln.strip()
+            for ln in SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        if set(prev_names) == set(session_names):
+            log.info("профили %s уже импортированы ранее — пропуск импорта",
+                     ", ".join(session_names))
             return
-        log.info("в флаге другое имя (%r != %r) — импортирую заново", prev, session_name)
+        log.info("в флаге другой набор имён (%s != %s) — импортирую заново",
+                 prev_names, session_names)
 
-    xlsx = prepare_session_xlsx(session_name)
+    xlsx = prepare_session_xlsx(session_names)
 
     shots = cfg.getboolean("logging", "screenshots")
-    log.info("импорт сессии %r из %s", session_name, xlsx)
+    log.info("импорт %d профилей (%s) из %s",
+             len(session_names), ", ".join(session_names), xlsx)
 
     # подстраховка: закрыть firewall, если всплыл перед импортом
     _dismiss_firewall_alert()
@@ -1982,8 +2019,8 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_name: str) 
     _wait_for_firewall_alert(10.0)
     screenshot("D3_after_import", shots)
 
-    SESSION_IMPORTED_FLAG.write_text(session_name, encoding="utf-8")
-    log.info("сессия импортирована, флаг записан")
+    SESSION_IMPORTED_FLAG.write_text("\n".join(session_names) + "\n", encoding="utf-8")
+    log.info("импорт запущен (%d профилей), флаг записан", len(session_names))
 
 
 def search_session(cfg: configparser.ConfigParser, session_name: str) -> None:
@@ -2022,11 +2059,14 @@ def run() -> int:
         #     UI больше не дёргаем.
         activate_api_port_if_needed(cfg)
 
-        # 0.7 Сессия машины: уникальное имя CL-XXXXXXXX генерится один раз
-        #     и хранится в .session_name. Первый запуск — клонируем шаблон
-        #     xlsx с этим именем + импорт в LS через UI.
-        session_name = load_session_name()
-        import_session_if_needed(cfg, session_name)
+        # 0.7 Профили машины: уникальные имена CL-XXXXXXXX генерятся один
+        #     раз (count из config.ini [profiles]) и хранятся в .session_name
+        #     (по строке на профиль). Первый запуск — клонируем шаблон xlsx
+        #     с N строками + ОДИН импорт в LS через UI (Mass Import создаёт
+        #     все сессии из одного файла).
+        profiles_count = cfg.getint("profiles", "count", fallback=1)
+        session_names = load_session_names(profiles_count)
+        import_session_if_needed(cfg, session_names)
         _dismiss_firewall_alert()
 
         log.info("UI install завершён успешно (логин + API-порт + импорт сессии)")
@@ -2041,17 +2081,21 @@ def run() -> int:
         # за 6 минут до того как реально безопасно. Сейчас push идёт ровно
         # в момент когда сессия в catalog'е, warmup_api готов стартануть.
         base_url_for_poll, _ = _parse_api_port_from_config(cfg)
-        if not _wait_for_session_in_catalog(base_url_for_poll, session_name):
+        if not _wait_for_session_in_catalog(base_url_for_poll, session_names):
             poll_total_min = sum(_POST_IMPORT_POLL_SCHEDULE) // 60
+            still_missing = _sessions_missing_in_catalog(
+                base_url_for_poll, session_names)
             log.warning(
-                "сессия %r не появилась в /sessions за ~%d мин — "
+                "профили %s не появились в /sessions за ~%d мин — "
                 "warmup_api НЕ спавню. Следующий 45-мин tick подхватит.",
-                session_name, poll_total_min)
+                ", ".join(still_missing) or "?", poll_total_min)
             try:
                 notify_ntfy(
                     _ntfy_header() +
-                    f"сессия {session_name!r} не появилась в LS /sessions "
+                    f"профили не появились в LS /sessions "
                     f"за ~{poll_total_min} мин после Mass Import.\n"
+                    f"ждали: {', '.join(session_names)}\n"
+                    f"не хватает: {', '.join(still_missing) or '?'}\n"
                     f"warmup_api НЕ стартован. Следующий 45-мин tick "
                     f"попробует через run_api.bat сам — возможно к тому "
                     f"моменту LS догонит cloud sync.\n\n"
@@ -2084,7 +2128,9 @@ def run() -> int:
                 notify_ntfy(
                     _ntfy_header() +
                     f"UI install OK {count}/{SUCCESS_NOTIFY_COUNT}\n"
-                    f"Сессия видна в LS catalog, запускаю warmup_api в фоне.\n"
+                    f"Профилей импортировано: {len(session_names)} "
+                    f"({', '.join(session_names)})\n"
+                    f"Все видны в LS catalog, запускаю warmup_api в фоне.\n"
                     f"RDP можно отключать — дальше всё само.",
                     title="warmup OK",
                     priority="low",
@@ -2141,14 +2187,21 @@ def run() -> int:
             # schtasks. Полный nuke-and-retry тут излишен и потеряет
             # ~10 мин уже сделанной cloud верификации.
             if "import_button" in str(exc):
-                # Подтягиваем имя сессии чтобы вставить в команду — оператор
-                # копипастит без подстановок. Если файла нет (странный случай)
-                # — пишем placeholder, пусть оператор сам заменит.
+                # Подтягиваем имена профилей чтобы вставить в команду —
+                # оператор копипастит без подстановок. Set-Content с
+                # PowerShell-массивом @('A','B') пишет каждый элемент
+                # отдельной строкой — ровно формат флага. Если файла нет
+                # (странный случай) — placeholder, пусть заменит сам.
                 try:
-                    sess_for_fix = SESSION_NAME_FILE.read_text(
-                        encoding="utf-8").strip()
+                    _names_fix = [
+                        ln.strip()
+                        for ln in SESSION_NAME_FILE.read_text(
+                            encoding="utf-8").splitlines()
+                        if ln.strip()
+                    ] or ["CL-XXXXXXXX"]
                 except Exception:
-                    sess_for_fix = "CL-XXXXXXXX"
+                    _names_fix = ["CL-XXXXXXXX"]
+                sess_for_fix = "@(" + ",".join(f"'{n}'" for n in _names_fix) + ")"
                 fix_text = (
                     "\n---\n"
                     "fix (LS на этом этапе УЖЕ показал Mass Import с preview):\n"
@@ -2156,7 +2209,7 @@ def run() -> int:
                     "2. В LS GUI кликни кнопку IMPORT вручную\n"
                     "3. Дождись пока Mass Import dialog закроется (3-7 мин — это cloud sync)\n"
                     "4. В PowerShell ОБЕ команды (порядок важен):\n"
-                    f"     Set-Content C:\\warmup\\.session_imported '{sess_for_fix}'\n"
+                    f"     Set-Content C:\\warmup\\.session_imported {sess_for_fix}\n"
                     "     schtasks /run /tn LinkenSphereWarmup\n"
                     "Первая команда пишет флаг 'сессия импортирована' (warmup.py\n"
                     "не успел его записать из-за timeout'а) — иначе run_api.bat\n"
