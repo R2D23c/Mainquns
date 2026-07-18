@@ -30,6 +30,11 @@ if exist "%~dp0.api_activated"    del /q "%~dp0.api_activated"
 if exist "%~dp0.warmup_state"     del /q "%~dp0.warmup_state"
 if exist "%~dp0.warmup_target"    del /q "%~dp0.warmup_target"
 if exist "%~dp0.warmup_count"     del /q "%~dp0.warmup_count"
+REM Multi-profile: per-profile счётчики .warmup_target.CL-* / .warmup_count.CL-*
+REM и флаги экспорта cookies. del с wildcard молчит если файлов нет.
+del /q "%~dp0.warmup_target.*"  >nul 2>&1
+del /q "%~dp0.warmup_count.*"   >nul 2>&1
+del /q "%~dp0.cookies_exported.*" >nul 2>&1
 if exist "%~dp0.warmup_started_at" del /q "%~dp0.warmup_started_at"
 if exist "%~dp0.notified_done"    del /q "%~dp0.notified_done"
 if exist "%~dp0.first_start"      del /q "%~dp0.first_start"

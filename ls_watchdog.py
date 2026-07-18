@@ -108,14 +108,19 @@ def _machine_id() -> str:
 
 
 def _load_session_name() -> str:
-    """Имя сессии (CL-XXXXXXXX) из .session_name. Для watchdog event'ов это
-    оператору ориентир 'какая VPS прислала push' в скоплении уведомлений."""
+    """Имена профилей (CL-XXXXXXXX) из .session_name. Для watchdog event'ов
+    это оператору ориентир 'какая VPS прислала push' в скоплении уведомлений.
+    Мульти-профиль: в файле N строк — показываем все через запятую."""
     f = ROOT / ".session_name"
     try:
         if f.exists():
-            n = f.read_text(encoding="utf-8").strip()
-            if n:
-                return n
+            names = [
+                ln.strip()
+                for ln in f.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+            if names:
+                return ", ".join(names)
     except Exception:
         pass
     return "<unknown>"

@@ -11,7 +11,10 @@ credentials.ini
 .session_name
 .api_activated
 .warmup_target
+.warmup_target.*
 .warmup_count
+.warmup_count.*
+.cookies_exported.*
 .notified_done
 .first_start
 warmup_api.log

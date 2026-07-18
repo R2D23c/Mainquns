@@ -6,6 +6,10 @@
 #   $env:WINDOWS_ADMIN_PASSWORD = "..."   # optional, enables auto-recovery
 #   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/main/setup.ps1 | iex
 #
+# Canary/test install from a feature branch (e.g. multi-profile):
+#   $env:WARMUP_BRANCH = "multi-profile"
+#   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
+#
 # What it does:
 #   - check/install Git and Python 3.12 (via winget; falls back to direct
 #     installer downloads from github/python.org if winget unavailable on VPS)
@@ -152,15 +156,30 @@ Install-Git
 Install-Python
 
 # 3. Clone repo
+# WARMUP_BRANCH env var -> install from a feature branch (e.g. multi-profile)
+# instead of main. For canary/test VPS only; production machines omit it.
 $repoDir = "C:\warmup"
+$branch = $env:WARMUP_BRANCH
 if (-not (Test-Path $repoDir)) {
     Write-Step "Cloning https://github.com/r2d23c/mainquns -> $repoDir"
     Set-Location C:\
-    git clone https://github.com/r2d23c/mainquns warmup
+    if ($branch) {
+        Write-Step "WARMUP_BRANCH=$branch -- cloning that branch"
+        git clone -b $branch https://github.com/r2d23c/mainquns warmup
+    } else {
+        git clone https://github.com/r2d23c/mainquns warmup
+    }
 } else {
     Write-Step "$repoDir already exists - git pull"
     Set-Location $repoDir
-    git pull
+    if ($branch) {
+        Write-Step "WARMUP_BRANCH=$branch -- checkout + pull that branch"
+        git fetch origin $branch
+        git checkout $branch
+        git pull origin $branch
+    } else {
+        git pull
+    }
 }
 Set-Location $repoDir
 
