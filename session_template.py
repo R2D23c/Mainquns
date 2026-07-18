@@ -94,19 +94,25 @@ ADAPTER_PROFILES: dict[str, tuple[list[int], list[int], list[str]]] = {
 }
 
 
-def build_session_xlsx(
+def build_sessions_xlsx(
     template: Path,
     target: Path,
-    session_name: str,
+    session_names: list[str],
     *,
     rng: random.Random | None = None,
 ) -> Path:
-    """Сгенерировать per-machine xlsx из шаблона.
+    """Сгенерировать per-machine xlsx из шаблона — N сессий одним файлом.
+
+    Mass Import в LS читает строки начиная с 3-й: одна строка = одна
+    сессия. Пишем len(session_names) строк (3, 4, 5, …), у КАЖДОЙ —
+    свой независимый рандомный fingerprint (видеокарта → CPU/RAM/Screen
+    из её профиля + версия Windows). Два профиля с одной VPS не должны
+    выглядеть как один и тот же "компьютер".
 
     Args:
         template: путь к session_imports/_template.xlsx
         target: куда сохранить готовый файл
-        session_name: имя сессии (попадает в A3)
+        session_names: имена сессий (по одному на строку, порядок сохраняется)
         rng: опциональный random.Random для тестов / детерминизма.
              По умолчанию использует системный random (true random).
 
@@ -116,32 +122,49 @@ def build_session_xlsx(
     if rng is None:
         rng = random.Random()
 
+    if not session_names:
+        raise ValueError("session_names пуст — нечего генерить")
+
     if not template.exists():
         raise FileNotFoundError(f"шаблон не найден: {template}")
 
     wb = openpyxl.load_workbook(template)
     ws = wb[wb.sheetnames[0]]
 
-    ws["A3"] = session_name
+    for i, session_name in enumerate(session_names):
+        row = 3 + i
+        ws[f"A{row}"] = session_name
 
-    for cell, val in FIXED.items():
-        ws[f"{cell}3"] = val
+        for cell, val in FIXED.items():
+            ws[f"{cell}{row}"] = val
 
-    # Сначала выбираем видеокарту — она определяет реалистичный набор
-    # CPU / RAM / Screen из своего профиля. Это исключает абсурдные
-    # сочетания (RTX 4070 с 4 ядрами и т.п.).
-    adapter = rng.choice(list(ADAPTER_PROFILES.keys()))
-    cpu_options, ram_options, screen_options = ADAPTER_PROFILES[adapter]
+        # Сначала выбираем видеокарту — она определяет реалистичный набор
+        # CPU / RAM / Screen из своего профиля. Это исключает абсурдные
+        # сочетания (RTX 4070 с 4 ядрами и т.п.).
+        adapter = rng.choice(list(ADAPTER_PROFILES.keys()))
+        cpu_options, ram_options, screen_options = ADAPTER_PROFILES[adapter]
 
-    ws["M3"] = rng.choice(cpu_options)
-    ws["N3"] = rng.choice(ram_options)
-    ws["O3"] = rng.choice(screen_options)
-    ws["P3"] = rng.choice(SYS_VERSIONS)
-    ws["Q3"] = adapter
+        ws[f"M{row}"] = rng.choice(cpu_options)
+        ws[f"N{row}"] = rng.choice(ram_options)
+        ws[f"O{row}"] = rng.choice(screen_options)
+        ws[f"P{row}"] = rng.choice(SYS_VERSIONS)
+        ws[f"Q{row}"] = adapter
 
     target.parent.mkdir(parents=True, exist_ok=True)
     wb.save(target)
     return target
+
+
+def build_session_xlsx(
+    template: Path,
+    target: Path,
+    session_name: str,
+    *,
+    rng: random.Random | None = None,
+) -> Path:
+    """Одиночная сессия — тонкая обёртка над build_sessions_xlsx.
+    Оставлена для обратной совместимости вызовов."""
+    return build_sessions_xlsx(template, target, [session_name], rng=rng)
 
 
 if __name__ == "__main__":
