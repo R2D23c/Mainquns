@@ -6,6 +6,41 @@
 
 ---
 
+## 0. Мульти-профиль: несколько сессий на одной VPS (ветка `multi-profile`)
+
+**Сейчас (ветка multi-profile):** одна VPS прогревает N профилей (LS-сессий) вместо одного. Все N импортируются **одним** Mass Import'ом (одна xlsx с N строками, у каждой свой рандомный fingerprint), греются **последовательно** — один профиль на 45-мин tick, ротация по наименее прогретому.
+
+**Почему не параллельно:** LS API держит глобальный лок на аккаунт (см. 9-step pyramid) — два одновременных `start_warmup` с одной машины устроят self-409-шторм. Плюс два Chromium-warmup'а не влезают в 2c/4gb VPS.
+
+**Файл:** `config.ini`, секция `[profiles]`
+```ini
+[profiles]
+count = 2
+```
+
+**Связанные настройки:** `[api] urls_total_target_min/max` в этой ветке трактуются **как per-profile** (по умолчанию 150-250 → ~2.5-3.5k cookies на профиль). При 2 профилях суммарно 300-500 URL — тот же wall-clock что у одиночной схемы (3-9 ч). При 4-5 профилях подними бюджет времени или опусти target до ~100-150.
+
+**Что происходит после изменения `count`:**
+| Сценарий | Эффект |
+|---|---|
+| **Новая VPS** (`.session_name` не существует) | Сгенерится N имён, импорт N профилей. ✓ |
+| **Уже запущенная VPS** | `count` игнорируется — состав профилей зафиксирован в `.session_name` (N строк). Менять поздно. |
+
+**State-файлы мульти-режима** (все gitignored, чистятся `freshstart.bat`):
+- `.session_name` / `.session_imported` — N строк (1 строка = легаси одиночный режим, код идёт по старому пути со старыми файлами)
+- `.warmup_target.<имя>` / `.warmup_count.<имя>` — per-profile счётчики
+- `.cookies_exported.<имя>` — флаг успешного export'а cookies профиля (пишется ТОЛЬКО после успеха; если export упал — следующий tick ретраит)
+
+**Уведомления:** ⚙️ per-cycle показывает активный профиль + прогресс всех; 🎉 `profile done k/N` (priority default) — профиль готов, cookies уже в `cookies_export/`; финальный 🎉 `warmup all done` (priority high, звук) — когда готовы ВСЕ.
+
+**Установка тестовой VPS с этой ветки:**
+```powershell
+$env:WARMUP_BRANCH = "multi-profile"
+iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
+```
+
+---
+
 ## 1. Изменить целевой объём прогрева (target URL count)
 
 **Сейчас:** на каждой VPS при первом запуске генерится `random.randint(300, 500)` и пишется в `.warmup_target`. Цикл идёт пока `.warmup_count >= .warmup_target` → 🎉 + auto-disable.

@@ -779,3 +779,71 @@ Get-Content C:\warmup\watchdog.log -Tail 30 -Wait
 9. **ВСЕГДА** пишет recovery-команду прямо в push, чтобы оператор копипастил без перехода в чат/доку. И **session_name подставляй** из `.session_name` файла, не оставляй placeholder.
 
 10. **ВСЕГДА** проверяй тайминги конфликтов когда меняешь любой timeout. Critical: 45-мин Task Scheduler tick, 75-мин watchdog stuck, 600с launch_wait, 600с import_button wait, 50с ping retry, 460с polling /sessions, 1660с 9-step pyramid.
+
+## Сессия 18 июля 2026 — ветка multi-profile (N профилей на VPS)
+
+### Что это
+
+Ветка `multi-profile` (от main): одна VPS греет **N профилей** (default
+count=2, расширяемо до 3-5) вместо одного. Main и старые машины НЕ
+затронуты — ветка живёт параллельно до обкатки на canary VPS.
+
+### Ключевые решения (не пересматривать без причины)
+
+1. **Прогрев ПОСЛЕДОВАТЕЛЬНЫЙ, не параллельный.** LS API держит
+   глобальный лок на аккаунт (вся история 409/pyramid об этом). Два
+   параллельных start_warmup с одной машины = self-409-шторм. Плюс два
+   Chromium-warmup'а не влезают в 2c/4gb. Ротация: на каждый 45-мин tick
+   выбирается наименее прогретый (по доле target) незавершённый профиль.
+
+2. **Импорт — ОДИН Mass Import.** xlsx с N строками (строки 3, 4, …),
+   у каждой свой независимый fingerprint. UI-клики не менялись вообще
+   (правило #1 соблюдено). См. `build_sessions_xlsx` в session_template.py.
+
+3. **Target per-profile:** `urls_total_target_min/max` в этой ветке =
+   150-250 НА ПРОФИЛЬ (~2.5-3.5k cookies/профиль, cookies ~линейны от
+   URL). При 2 профилях суммарно 300-500 → wall-clock как у старой схемы.
+
+4. **Export cookies — сразу по завершении каждого профиля**, не в конце.
+   Флаг `.cookies_exported.<имя>` пишется ТОЛЬКО после успешного export'а
+   (жёсткая идемпотентность). Упавший export тихо ретраится на следующем
+   tick'е (см. блок "Догоняем незакрытые export'ы" в warmup_api.run).
+
+### State-файлы ветки
+
+- `.session_name` / `.session_imported` — N строк (по профилю на строку).
+  **1 строка = легаси-режим**: код идёт по старому пути со старыми
+  файлами `.warmup_target`/`.warmup_count` — бит-в-бит совместимость.
+- `.warmup_target.<имя>` / `.warmup_count.<имя>` — per-profile (N>1).
+- `.cookies_exported.<имя>` — флаг export'а.
+- freshstart.bat чистит всё wildcard'ами.
+
+### Уведомления
+
+- ⚙️ per-cycle: активный профиль + прогресс всех профилей + total.
+- 🎉 `profile done k/N — CL-X` (priority **default**): профиль готов,
+  cookies уже в cookies_export/. Не high — не будим ночью, не low — милстоун.
+- 🎉 `warmup all done` (priority **high**, звук): ВСЕ профили готовы.
+- 🔧 `cookies exported — CL-X` (low): export прошёл со второй попытки.
+
+### Установка canary VPS с ветки
+
+```powershell
+$env:WARMUP_BRANCH = "multi-profile"
+iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
+```
+
+### Не проверено на реальной VPS (Phase 0 — оператор)
+
+1. Mass Import с xlsx из 2+ строк реально создаёт 2+ сессии (должен —
+   это его назначение, но на нашей LS-версии не проверялось).
+2. Длительность pre-import cloud sync на N строк (600с wait должен
+   покрыть 2-3 строки; для 5 — проверить).
+3. Параллельный start_warmup двух локальных сессий → подтвердить 409
+   (закрывает вопрос параллельности навсегда).
+
+### Мерж в main
+
+Только после успешного прогона canary VPS end-to-end (2 профиля →
+2 cookie-файла → 🎉). При мерже: main-машины со старым `.session_name`
+(1 строка) продолжают работать по легаси-пути автоматически.
