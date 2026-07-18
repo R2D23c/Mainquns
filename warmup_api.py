@@ -119,25 +119,41 @@ def load_credentials() -> configparser.ConfigParser:
     return creds
 
 
-def load_session_name() -> str:
-    """Имя сессии этой машины. Источники по приоритету:
-      1. .session_name (создаёт warmup.py на первом запуске)
+def load_profile_names() -> list[str]:
+    """Имена профилей этой машины (1..N, по строке в файле). Источники
+    по приоритету:
+      1. .session_name (создаёт warmup.py на первом запуске; N строк
+         в мульти-профильном режиме, 1 строка — легаси одиночный)
       2. .session_imported (миграция со старого формата — там было только имя)
     Если ни одного — фейл: install не отработал."""
     if SESSION_NAME_FILE.exists():
-        name = SESSION_NAME_FILE.read_text(encoding="utf-8").strip()
-        if name:
-            return name
+        names = [
+            ln.strip()
+            for ln in SESSION_NAME_FILE.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        if names:
+            return names
     if SESSION_IMPORTED_FLAG.exists():
-        raw = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
-        if raw:
-            # старый формат: только имя, либо новый — «<uuid>\t<name>»
-            _, _, name = raw.partition("\t")
-            return (name or raw).strip()
+        names = []
+        for ln in SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            # старый формат: только имя, либо «<uuid>\t<name>»
+            _, _, name = ln.partition("\t")
+            names.append((name or ln).strip())
+        if names:
+            return names
     raise RuntimeError(
         f"не найден ни .session_name, ни .session_imported — "
         f"запусти install/run.bat хотя бы раз, чтобы инициализировать сессию."
     )
+
+
+def load_session_name() -> str:
+    """Легаси-обёртка: все профили одной строкой (для header'ов/логов)."""
+    return ", ".join(load_profile_names())
 
 
 # Эмодзи в Title по типу события (по первому тегу). Telegram-бридж НЕ
@@ -262,7 +278,7 @@ def _to_console(msg: str) -> None:
         pass
 
 
-def _print_running_banner(session_name: str, machine_id: str) -> None:
+def _print_running_banner(session_label: str, machine_id: str) -> None:
     bar = "=" * 62
     for line in (
         "",
@@ -272,7 +288,7 @@ def _print_running_banner(session_name: str, machine_id: str) -> None:
         "",
         bar,
         "",
-        f"      session   :  {session_name}",
+        f"      profiles  :  {session_label}",
         f"      machine   :  {machine_id}",
         "",
         bar,
@@ -295,7 +311,7 @@ def _print_running_banner(session_name: str, machine_id: str) -> None:
 
 
 def _print_complete_banner(
-    session_name: str,
+    session_label: str,
     machine_id: str,
     total_time_en: str,
     urls_done: int,
@@ -311,7 +327,7 @@ def _print_complete_banner(
         "",
         bar,
         "",
-        f"      session     :  {session_name}",
+        f"      profiles    :  {session_label}",
         f"      machine     :  {machine_id}",
         f"      total time  :  {total_time_en}",
         f"      URLs        :  {urls_done}/{target}",
@@ -598,22 +614,48 @@ def materialize_run_urls(
     return out_file, urls
 
 
-def load_or_create_target(cfg: configparser.ConfigParser) -> int:
-    """Целевой суммарный объём прогрева. На первом запуске генерится
-    random.randint(min, max) и пишется в .warmup_target. Дальше всегда
-    читается оттуда — менять задним числом нельзя, иначе counter
-    становится неконсистентен."""
-    if WARMUP_TARGET_FILE.exists():
+# --- Per-profile state (multi-profile ветка) --------------------------------
+# При ОДНОМ профиле используются легаси-пути (.warmup_target /
+# .warmup_count) — поведение бит-в-бит совпадает со старой одиночной
+# схемой, state-файлы уже работающих машин читаются без миграции.
+# При N>1 профилях — суффиксованные файлы .warmup_target.<имя> /
+# .warmup_count.<имя>: атомарные, независимые, в стиле остальных флагов.
+
+def _target_file_for(name: str, single: bool) -> Path:
+    return WARMUP_TARGET_FILE if single else ROOT / f".warmup_target.{name}"
+
+
+def _count_file_for(name: str, single: bool) -> Path:
+    return WARMUP_COUNT_FILE if single else ROOT / f".warmup_count.{name}"
+
+
+def _exported_flag_for(name: str) -> Path:
+    """Флаг «cookies этого профиля успешно экспортированы». Пишется ТОЛЬКО
+    после полностью успешного export'а (жёсткая идемпотентность, как
+    .api_activated) — если export упал, следующий tick попробует ещё раз."""
+    return ROOT / f".cookies_exported.{name}"
+
+
+def load_or_create_target(cfg: configparser.ConfigParser, name: str,
+                          single: bool) -> int:
+    """Целевой объём прогрева ОДНОГО профиля. На первом запуске генерится
+    random.randint(min, max) независимо для каждого профиля и пишется в
+    его target-файл. Дальше всегда читается оттуда — менять задним числом
+    нельзя, иначе counter становится неконсистентен."""
+    tf = _target_file_for(name, single)
+    if tf.exists():
         try:
-            return int(WARMUP_TARGET_FILE.read_text(encoding="utf-8").strip())
+            return int(tf.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pass
     lo = cfg.getint("api", "urls_total_target_min", fallback=300)
     hi = cfg.getint("api", "urls_total_target_max", fallback=500)
     target = random.randint(lo, hi)
-    WARMUP_TARGET_FILE.write_text(str(target), encoding="utf-8")
-    WARMUP_STARTED_AT_FILE.write_text(str(int(time.time())), encoding="utf-8")
-    log.info("целевой объём прогрева: %d URL (зафиксирован в .warmup_target)", target)
+    tf.write_text(str(target), encoding="utf-8")
+    if not WARMUP_STARTED_AT_FILE.exists():
+        WARMUP_STARTED_AT_FILE.write_text(str(int(time.time())), encoding="utf-8")
+    log.info("целевой объём прогрева %s: %d URL (зафиксирован в %s)",
+             name, target, tf.name)
     return target
 
 
@@ -739,18 +781,19 @@ def _fmt_total_elapsed(started_at: int | None) -> str:
     return f"{m} мин"
 
 
-def load_warmed_count() -> int:
-    if not WARMUP_COUNT_FILE.exists():
+def load_warmed_count(name: str, single: bool) -> int:
+    cf = _count_file_for(name, single)
+    if not cf.exists():
         return 0
     try:
-        return int(WARMUP_COUNT_FILE.read_text(encoding="utf-8").strip())
+        return int(cf.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         return 0
 
 
-def add_warmed_count(n: int) -> int:
-    new_total = load_warmed_count() + n
-    WARMUP_COUNT_FILE.write_text(str(new_total), encoding="utf-8")
+def add_warmed_count(n: int, name: str, single: bool) -> int:
+    new_total = load_warmed_count(name, single) + n
+    _count_file_for(name, single).write_text(str(new_total), encoding="utf-8")
     return new_total
 
 
@@ -803,21 +846,27 @@ def disable_scheduled_task() -> bool:
     return False
 
 
-def load_session_imported_flag() -> tuple[str | None, str | None]:
-    """Читает .session_imported. Возвращает (uuid, name).
-    Поддерживает два формата:
-      - новый: «<uuid>\\t<name>» — записывается UI-инсталляцией после lookup
-      - старый: «<name>» — записан до перехода на uuid-flow
-    Если файла нет, возвращает (None, None) — сессию ещё не импортили."""
+def load_session_imported_flag() -> dict[str, str | None]:
+    """Читает .session_imported. Возвращает {name: uuid|None} по всем
+    строкам файла. Поддерживает форматы:
+      - «<uuid>\\t<name>» — с uuid (записывается после lookup)
+      - «<name>» — только имя (warmup.py пишет так сразу после IMPORT)
+    Мульти-профиль: по строке на профиль. Если файла нет — пустой dict:
+    сессии ещё не импортили."""
+    result: dict[str, str | None] = {}
     if not SESSION_IMPORTED_FLAG.exists():
-        return None, None
-    raw = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
-    if not raw:
-        return None, None
-    if "\t" in raw:
-        uuid, _, name = raw.partition("\t")
-        return uuid.strip() or None, name.strip() or None
-    return None, raw
+        return result
+    for ln in SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        if "\t" in ln:
+            uuid, _, name = ln.partition("\t")
+            if name.strip():
+                result[name.strip()] = uuid.strip() or None
+        else:
+            result[ln] = None
+    return result
 
 
 class ApiError(Exception):
@@ -1069,31 +1118,52 @@ def run() -> int:
     try:
         cfg = load_config()
         creds = load_credentials()
-        session_name = load_session_name()
+        profile_names = load_profile_names()
+        single = len(profile_names) == 1
+        session_label = ", ".join(profile_names)
         email = creds.get("account", "email").strip()
         password = creds.get("account", "password")
 
         # Сразу при старте пишем большой видимый баннер в окно консоли,
         # чтобы оператор знал что процесс жив и RDP можно отключать.
-        _print_running_banner(session_name, _machine_id())
+        _print_running_banner(session_label, _machine_id())
 
-        # One-shot гейт: уже прогрели целевой объём? — JOB DONE, на выход.
+        # Per-profile state: target каждого профиля независимый
+        # (random 150-250 из config), counter — свой файл на профиль.
+        # При одном профиле — легаси .warmup_target/.warmup_count.
+        targets = {n: load_or_create_target(cfg, n, single) for n in profile_names}
+        counts = {n: load_warmed_count(n, single) for n in profile_names}
+
+        def _progress_lines() -> str:
+            """Строка прогресса всех профилей для push'ей: имя, count/target,
+            ✔ у завершённых."""
+            out = []
+            for n in profile_names:
+                mark = " ✔" if counts[n] >= targets[n] else ""
+                out.append(f"{n}: {counts[n]}/{targets[n]} URL{mark}")
+            return "\n".join(out)
+
+        total_current = sum(counts.values())
+        total_target = sum(targets.values())
+
+        # One-shot гейт: ВСЕ профили прогреты? — JOB DONE, на выход.
         # Уведомление шлём РОВНО один раз (флаг .notified_done). Если scheduler
         # всё ещё стреляет (significa disable не сработал на прошлом запуске)
         # — пытаемся ещё раз, но без спама в ntfy.
-        target = load_or_create_target(cfg)
-        current = load_warmed_count()
-        if current >= target:
+        unfinished = [n for n in profile_names if counts[n] < targets[n]]
+        if not unfinished:
             if already_notified_done():
-                log.info("ALL JOBS DONE: %d/%d, уже уведомлял — тихий ретрай disable", current, target)
+                log.info("ALL JOBS DONE: %d/%d, уже уведомлял — тихий ретрай disable",
+                         total_current, total_target)
                 disable_scheduled_task()
                 _print_complete_banner(
-                    session_name, _machine_id(),
+                    session_label, _machine_id(),
                     _fmt_total_elapsed_en(load_started_at()),
-                    current, target, "see telegram",
+                    total_current, total_target, "see telegram",
                 )
                 return 0
-            log.info("ALL JOBS DONE: %d/%d URL прогрето — disable + notify", current, target)
+            log.info("ALL JOBS DONE: %d/%d URL прогрето — disable + notify",
+                     total_current, total_target)
             disabled = disable_scheduled_task()
             tail = ("scheduled task disabled. All jobs done 🎉"
                     if disabled else
@@ -1101,19 +1171,35 @@ def run() -> int:
                     f"  schtasks /change /tn {TASK_NAME} /disable")
             notify_ntfy(
                 _ntfy_header() +
-                f"total: {current}/{target} URL warmed\n" + tail,
+                _progress_lines() + "\n" +
+                f"total: {total_current}/{total_target} URL warmed\n" + tail,
                 title="warmup all done",
                 priority="high",
                 tags="tada",
             )
             mark_notified_done()
             _print_complete_banner(
-                session_name, _machine_id(),
+                session_label, _machine_id(),
                 _fmt_total_elapsed_en(load_started_at()),
-                current, target, "see telegram",
+                total_current, total_target, "see telegram",
             )
             return 0
-        log.info("прогресс: %d/%d URL (осталось ~%d)", current, target, max(0, target - current))
+
+        # Выбор активного профиля на этот tick: наименее прогретый
+        # (по доле от target) из незавершённых. Ротация получается сама:
+        # тик прогревает отстающего, на следующем тике отстаёт другой.
+        # Прогрев СТРОГО последовательный — один профиль за tick: LS API
+        # держит глобальный лок на аккаунт (см. 9-step pyramid), два
+        # параллельных warmup'а с одной машины устроили бы self-409-шторм.
+        active = min(unfinished, key=lambda n: counts[n] / max(1, targets[n]))
+        session_name = active  # для error-handler'а и legacy-хинтов
+        target = targets[active]
+        current = counts[active]
+        if not single:
+            log.info("активный профиль этого tick'а: %s (%d/%d незавершённых)",
+                     active, len(unfinished), len(profile_names))
+        log.info("прогресс %s: %d/%d URL (осталось ~%d)",
+                 active, current, target, max(0, target - current))
 
         base_url = cfg.get("api", "base_url", fallback="http://127.0.0.1:36555")
         http_timeout = cfg.getfloat("api", "http_timeout_seconds", fallback=15.0)
@@ -1167,21 +1253,53 @@ def run() -> int:
         log.info("signin как %s", email)
         client.signin(email, password)
 
-        # Сначала пробуем uuid из флага .session_imported (его пишет UI-инсталляция
-        # после импорта xlsx + GET /sessions). Это убирает любые коллизии имён.
-        # Если флага нет или в нём только имя — fallback на поиск по имени.
-        stored_uuid, stored_name = load_session_imported_flag()
-        if stored_uuid:
-            log.info("uuid сессии из .session_imported: %s (name=%r)", stored_uuid, stored_name)
-            sess = client.find_session_by_uuid(stored_uuid)
-            uuid = stored_uuid
-        else:
-            log.info("ищу сессию по имени %r (uuid в .session_imported не записан)", session_name)
-            sess = client.find_session_by_name(session_name)
-            uuid = sess.get("uuid")
-            if not uuid:
-                raise ApiError(f"в сессии {session_name!r} нет uuid: {sess}")
-        log.info("используем uuid=%s (name=%r)", uuid, sess.get("name"))
+        imported_map = load_session_imported_flag()
+
+        def _resolve_uuid(profile: str) -> str:
+            """uuid профиля: сперва из .session_imported (если там формат
+            с uuid), иначе поиск по имени в /sessions. Коллизия имён на
+            общем LS-аккаунте → ApiError (safety-net как раньше)."""
+            stored = imported_map.get(profile)
+            if stored:
+                log.info("uuid профиля %s из .session_imported: %s", profile, stored)
+                client.find_session_by_uuid(stored)  # валидация что жива
+                return stored
+            log.info("ищу сессию по имени %r (uuid в .session_imported не записан)", profile)
+            s = client.find_session_by_name(profile)
+            u = s.get("uuid")
+            if not u:
+                raise ApiError(f"в сессии {profile!r} нет uuid: {s}")
+            return u
+
+        # Догоняем незакрытые export'ы: профиль мог достичь target'а на
+        # прошлом tick'е, а export cookies упасть (409 от LS / timeout).
+        # Флаг .cookies_exported.<имя> пишется только после успеха —
+        # здесь тихо ретраим все завершённые-но-не-экспортнутые.
+        for done_name in profile_names:
+            if counts[done_name] < targets[done_name]:
+                continue
+            if _exported_flag_for(done_name).exists():
+                continue
+            log.info("профиль %s завершён, но cookies не экспортированы — ретрай", done_name)
+            try:
+                _u = _resolve_uuid(done_name)
+                _n_cookies = count_session_cookies(client, _u, pre_wait_seconds=10)
+                if _n_cookies is not None:
+                    _exported_flag_for(done_name).write_text("1", encoding="utf-8")
+                    notify_ntfy(
+                        _ntfy_header() +
+                        f"profile {done_name}: cookies экспортированы со второй "
+                        f"попытки ({_n_cookies} шт) → {COOKIES_EXPORT_DIR}",
+                        title=f"cookies exported — {done_name}",
+                        priority="low",
+                        tags="wrench",
+                    )
+            except Exception as e:
+                log.warning("ретрай export'а %s не прошёл: %s — следующий tick попробует",
+                            done_name, e)
+
+        uuid = _resolve_uuid(active)
+        log.info("используем uuid=%s (профиль %s)", uuid, active)
 
         pool = load_url_pool(cfg)
         # remaining > 0 гарантировано: выше был return 0 при current >= target
@@ -1363,43 +1481,76 @@ def run() -> int:
 
         # Считаем сколько URL реально прогрели в этом запуске (только успешные чанки).
         urls_warmed_now = sum(len(c) for c in chunks[:chunks_done])
-        new_total = add_warmed_count(urls_warmed_now)
-        target_reached = new_total >= target
+        new_total = add_warmed_count(urls_warmed_now, active, single)
+        counts[active] = new_total
+        profile_done = new_total >= target
+        all_done = all(counts[n] >= targets[n] for n in profile_names)
 
-        log.info("сценарий завершён успешно за %.0fм (%d/%d чанков, +%d URL → %d/%d)",
-                 elapsed / 60, chunks_done, len(chunks), urls_warmed_now, new_total, target)
+        log.info("сценарий завершён успешно за %.0fм (%d/%d чанков, +%d URL → %s %d/%d)",
+                 elapsed / 60, chunks_done, len(chunks), urls_warmed_now,
+                 active, new_total, target)
 
-        if target_reached:
-            disabled = disable_scheduled_task()
-            total_elapsed = _fmt_total_elapsed(load_started_at())
+        if profile_done:
+            # Профиль добил свой target — сразу экспортируем ЕГО cookies
+            # (deliverable появляется как можно раньше; если export упал —
+            # флаг не пишем, ретрай на следующем tick'е, см. блок выше).
             cookies_n = count_session_cookies(client, uuid)
             cookies_str = f"{cookies_n}" if cookies_n is not None else "?"
-            tail = ("scheduled task disabled. All jobs done."
-                    if disabled else
-                    "could NOT disable schedule — run manually:\n"
-                    f"  schtasks /change /tn {TASK_NAME} /disable")
-            notify_ntfy(
-                _ntfy_header() +
-                f"this run: {urls_warmed_now} URL ({elapsed/60:.0f} мин)\n"
-                f"total: {new_total}/{target} URL — target reached 🎉\n"
-                f"total time: {total_elapsed}\n"
-                f"cookies: {cookies_str}\n" + tail,
-                title="warmup all done",
-                priority="high",
-                tags="tada",
-            )
-            mark_notified_done()
-            # Финальный баннер в консоль — заменяет «RUNNING» в окне.
-            _print_complete_banner(
-                session_name, _machine_id(),
-                _fmt_total_elapsed_en(load_started_at()),
-                new_total, target, cookies_str,
-            )
+            if cookies_n is not None:
+                _exported_flag_for(active).write_text("1", encoding="utf-8")
+
+            if all_done:
+                disabled = disable_scheduled_task()
+                total_elapsed = _fmt_total_elapsed(load_started_at())
+                tail = ("scheduled task disabled. All jobs done."
+                        if disabled else
+                        "could NOT disable schedule — run manually:\n"
+                        f"  schtasks /change /tn {TASK_NAME} /disable")
+                notify_ntfy(
+                    _ntfy_header() +
+                    f"последний профиль {active}: {new_total}/{target} URL, "
+                    f"cookies: {cookies_str}\n"
+                    + _progress_lines() + "\n"
+                    f"total: {sum(counts.values())}/{sum(targets.values())} URL — "
+                    f"все {len(profile_names)} профилей готовы 🎉\n"
+                    f"total time: {total_elapsed}\n"
+                    f"cookies (все профили) → {COOKIES_EXPORT_DIR}\n" + tail,
+                    title="warmup all done",
+                    priority="high",
+                    tags="tada",
+                )
+                mark_notified_done()
+                # Финальный баннер в консоль — заменяет «RUNNING» в окне.
+                _print_complete_banner(
+                    session_label, _machine_id(),
+                    _fmt_total_elapsed_en(load_started_at()),
+                    sum(counts.values()), sum(targets.values()), cookies_str,
+                )
+            else:
+                # Готов один из N — деливерабл уже лежит в cookies_export,
+                # оператор может забрать не дожидаясь остальных. priority
+                # default (не low): это милстоун, но не будим ночью как high.
+                n_done = sum(1 for n in profile_names if counts[n] >= targets[n])
+                notify_ntfy(
+                    _ntfy_header() +
+                    f"профиль {active} готов: {new_total}/{target} URL "
+                    f"({elapsed/60:.0f} мин последний цикл)\n"
+                    f"cookies: {cookies_str} → {COOKIES_EXPORT_DIR}\n"
+                    + _progress_lines() + "\n"
+                    f"готово {n_done}/{len(profile_names)} профилей, "
+                    f"следующий tick продолжит остальные.",
+                    title=f"profile done {n_done}/{len(profile_names)} — {active}",
+                    priority="default",
+                    tags="tada",
+                )
         else:
             notify_ntfy(
                 _ntfy_header() +
+                f"profile: {active}\n"
                 f"chunks: {chunks_done}/{len(chunks)} × до {chunk_size} = {urls_warmed_now} URL\n"
-                f"progress: {new_total}/{target} URL ({100*new_total//target}%)\n"
+                + _progress_lines() + "\n"
+                f"total: {sum(counts.values())}/{sum(targets.values())} URL "
+                f"({100*sum(counts.values())//max(1, sum(targets.values()))}%)\n"
                 f"elapsed: {elapsed/60:.0f} мин",
                 title="warmup cycle",
                 priority="low",
