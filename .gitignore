@@ -29,3 +29,7 @@ watchdog.log
 .last_boot
 notify_boot.log
 ls_launch.log
+
+# operator/ fleet tools — секреты и генерённые артефакты только локально
+operator/hosts.csv
+operator/rdp/
