@@ -1105,7 +1105,103 @@ def wait_for_warmup_done(client: ApiClient, uuid: str, cfg: configparser.ConfigP
     return False
 
 
+# --- Single-instance guard + запуск по готовности ---------------------------
+#
+# Циклы больше не ждут 45-мин Task Scheduler tick: после успешного цикла
+# warmup_api сразу (после короткого rest'а) гонит следующий, пока все
+# профили не добьют свои target'ы. Выигрыш двойной:
+#   1. Убирает ~8-мин простой между циклами (37-мин цикл / 45-мин сетка).
+#   2. Убирает 90-мин эффективный интервал: раньше если цикл переваливал
+#      за 45 мин (409 pyramid, медленная LS), следующий tick пропускался
+#      IgnoreNew'ом и прогрев вставал до следующей сетки.
+#
+# Task Scheduler (Time 45 мин + AtStartup) ОСТАЁТСЯ как каскад-fallback:
+# при любой ошибке цепочка выходит (как раньше), и следующий tick /
+# watchdog подхватывают. Если цепочка жива — тики становятся no-op'ами.
+#
+# Защита от параллельных инстансов — named mutex. Сценарии, где без него
+# было бы два warmup_api на одной LS (self-409-шторм):
+#   - цепочка запущена detached из warmup.py (после install), а через
+#     45 мин стреляет Task Scheduler tick → run_api.bat → второй экземпляр.
+#     MultipleInstances=IgnoreNew тут НЕ спасает: detached-процесс не
+#     является инстансом задачи.
+#   - watchdog stuck-detection force-trigger'ит задачу пока цепочка жива.
+# Mutex авто-освобождается при смерти процесса-владельца (в отличие от
+# lock-файла нет проблемы stale state после kill/BSOD/hard reset).
+#
+# Watchdog совместим из коробки: при main task Running он не вмешивается
+# (early-exit), а no-op тики обновляют LastRunTime → stuck-detection
+# не сработает и на detached-цепочке.
+
+_MUTEX_NAME = "Local\\LinkenSphereWarmupApiSingleton"
+_mutex_handle = None  # держим ссылку до конца жизни процесса
+
+# Отдых между циклами цепочки: LS дофлашивает cookies на диск, Chromium
+# делает GC. 90с — компромисс: заметно меньше старого 8-мин gap'а, но LS
+# не молотит непрерывно. Плюс анти-collision jitter 0-120с в начале
+# каждого цикла остаётся — суммарная пауза между циклами 1.5-3.5 мин.
+_CHAIN_REST_SECONDS = 90
+# Предохранитель от бесконечной цепочки при любом непредвиденном багe
+# счётчиков: 750 URL worst-case (5 профилей × 150) / ~95 URL за цикл ≈ 8
+# циклов; 30 — с запасом x3.
+_CHAIN_MAX_CYCLES = 30
+
+
+def _acquire_single_instance() -> bool:
+    """True = мы единственный warmup_api на машине (mutex захвачен и
+    держится до смерти процесса). False = другой экземпляр уже работает.
+    На не-Windows и при любой ошибке CreateMutex — fail-open True
+    (лучше маловероятный parallel, чем полный отказ прогрева)."""
+    global _mutex_handle
+    if sys.platform != "win32":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+        if not handle:
+            return True
+        ERROR_ALREADY_EXISTS = 183
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _mutex_handle = handle
+        return True
+    except Exception:
+        return True
+
+
 def run() -> int:
+    """Entry point: цепочка циклов по готовности под single-instance guard'ом.
+    Возвращает 0 при успехе/no-op, 1 при ошибке (код последнего цикла)."""
+    if not _acquire_single_instance():
+        # Другой warmup_api уже крутит цепочку. Это штатно: 45-мин tick /
+        # force-trigger при живой цепочке. Тихий no-op — без push'ей,
+        # без баннера (не затираем консоль работающего экземпляра).
+        log.info("другой warmup_api уже работает (mutex busy) — no-op, выход")
+        return 0
+    for cycle_i in range(1, _CHAIN_MAX_CYCLES + 1):
+        rc = _run_cycle()
+        if rc == 2:
+            # Все профили добили target'ы — задача disabled, 🎉 отправлен.
+            return 0
+        if rc != 0:
+            # Ошибка: сессия освобождена, ⚠️ push ушёл (внутри _run_cycle).
+            # Выходим — 45-мин каскад / watchdog подхватят как раньше.
+            return rc
+        log.info("цепочка: цикл %d завершён, есть незавершённые профили — "
+                 "rest %dс и продолжаем", cycle_i, _CHAIN_REST_SECONDS)
+        time.sleep(_CHAIN_REST_SECONDS)
+    log.warning("цепочка: предохранитель %d циклов — выход, каскад продолжит",
+                _CHAIN_MAX_CYCLES)
+    return 0
+
+
+def _run_cycle() -> int:
+    """Один полный цикл прогрева (~37 мин): ping → signin → выбор профиля →
+    чанки → счётчики → push'и. Коды возврата:
+      0 — цикл успешен, остались незавершённые профили (цепочка продолжает)
+      2 — ВСЕ профили достигли target'ов (цепочка останавливается)
+      1 — ошибка (⚠️ push отправлен, цепочка останавливается)"""
     log.info("=" * 60)
     log.info("Linken Sphere warm-up via API: старт")
 
@@ -1161,7 +1257,7 @@ def run() -> int:
                     _fmt_total_elapsed_en(load_started_at()),
                     total_current, total_target, "see telegram",
                 )
-                return 0
+                return 2
             log.info("ALL JOBS DONE: %d/%d URL прогрето — disable + notify",
                      total_current, total_target)
             disabled = disable_scheduled_task()
@@ -1183,7 +1279,7 @@ def run() -> int:
                 _fmt_total_elapsed_en(load_started_at()),
                 total_current, total_target, "see telegram",
             )
-            return 0
+            return 2
 
         # Выбор активного профиля на этот tick: наименее прогретый
         # (по доле от target) из незавершённых. Ротация получается сама:
@@ -1538,7 +1634,7 @@ def run() -> int:
                     f"cookies: {cookies_str} → {COOKIES_EXPORT_DIR}\n"
                     + _progress_lines() + "\n"
                     f"готово {n_done}/{len(profile_names)} профилей, "
-                    f"следующий tick продолжит остальные.",
+                    f"цепочка продолжит остальные через ~2 мин.",
                     title=f"profile done {n_done}/{len(profile_names)} — {active}",
                     priority="default",
                     tags="tada",
@@ -1556,7 +1652,9 @@ def run() -> int:
                 priority="low",
                 tags="gear",
             )
-        return 0
+        # 2 = все профили готовы (цепочка останавливается),
+        # 0 = цикл успешен, работа осталась (цепочка продолжает).
+        return 2 if all_done else 0
 
     except Exception as exc:
         log.exception("сценарий упал: %s", exc)

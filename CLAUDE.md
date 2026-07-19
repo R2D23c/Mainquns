@@ -809,6 +809,23 @@ count=3, расширяемо до 5) вместо одного. Main и ста�
    (жёсткая идемпотентность). Упавший export тихо ретраится на следующем
    tick'е (см. блок "Догоняем незакрытые export'ы" в warmup_api.run).
 
+5. **Запуск по готовности (цепочка) + 45-мин каскад как fallback.**
+   warmup_api после успешного цикла НЕ выходит: rest 90с → следующий
+   цикл, пока все профили не готовы (`run()` → цикл `_run_cycle()`,
+   коды 0=продолжай / 2=всё готово / 1=ошибка-выход). Выигрыш: минус
+   ~8-мин gap каждого цикла И минус 90-мин эффективный интервал, когда
+   цикл переваливал за 45 мин (IgnoreNew съедал тик). Task Scheduler
+   (Time 45 мин + AtStartup) остаётся нетронутым — это каскад-fallback:
+   при любой ошибке цепочка выходит, тик/watchdog подхватывают.
+   **Single-instance named mutex** (`Local\LinkenSphereWarmupApiSingleton`):
+   второй экземпляр (тик при живой detached-цепочке, force-trigger
+   watchdog'а) молча выходит rc=0. Mutex авто-освобождается при смерти
+   процесса — stale-state невозможен. Watchdog совместим из коробки:
+   при main task Running он не вмешивается (early-exit в main()), а
+   no-op тики обновляют LastRunTime → stuck-detection молчит и на
+   detached-цепочке. НЕ заменяй mutex на lock-файл и НЕ убирай
+   предохранитель _CHAIN_MAX_CYCLES=30.
+
 ### State-файлы ветки
 
 - `.session_name` / `.session_imported` — N строк (по профилю на строку).
