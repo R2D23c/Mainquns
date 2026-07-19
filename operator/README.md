@@ -3,6 +3,55 @@
 Живут **отдельно от пайплайна VPS**: ничего из этой папки на машины не
 качается и не влияет на прогрев. Это утилиты для тебя, на твоём Windows-ноуте.
 
+Два независимых пути «одна кнопка → все VPS открыты». Нужен **один**:
+- **mRemoteNG** (GUI, рекомендуется для парка) — массовый импорт через
+  `mremoteng-import.ps1`, ниже.
+- **fleet.ps1** — без стороннего софта (нативные `.rdp` + `cmdkey`),
+  запасной вариант. См. раздел в конце.
+
+---
+
+## mremoteng-import.ps1 — массовый импорт парка в mRemoteNG (до 30+ VPS)
+
+Готовит CSV со всеми VPS для `File -> Import -> Import from CSV`, чтобы не
+вбивать каждую машину руками. Схему (разделитель, колонки, значение
+Resolution) берёт из ТВОЕГО экспорта — работает на любой версии mRemoteNG
+без угадывания формата.
+
+### Один раз — эталон
+
+1. В mRemoteNG настрой **одно** подключение как надо, в т.ч.
+   **Config -> Display -> Resolution = 2560x1440**. Проверь, что коннектится.
+2. Выдели его -> **File -> Export** -> сохрани `template.csv` (тип
+   «mRemoteNG CSV»).
+
+### Каждая партия
+
+```powershell
+cd путь\к\repo\operator
+Copy-Item hosts.csv.example hosts.csv     # если ещё нет
+notepad hosts.csv                         # впиши парк: name,ip,user,password
+.\mremoteng-import.ps1 -Template template.csv
+```
+
+Затем в mRemoteNG: **File -> Import -> Import from CSV** -> выбери
+`mremoteng-import.csv`. Все VPS появятся разом, с паролями и резолюцией
+1440p (унаследованы из эталона). Правый клик по папке -> **Connect** —
+открыть весь парк.
+
+Параметры: `-HostsFile D:\batch2.csv`, `-Out D:\import2.csv`,
+`-Resolution Res2560x1440` (принудительно, если эталон был не в 1440p).
+
+### Безопасность
+
+`hosts.csv` и `mremoteng-import.csv` — **gitignored** (как `credentials.ini`).
+Пароли парка = секрет, живут только на ноуте. После импорта сгенерённый
+`mremoteng-import.csv` можно удалить — пароли уже в профиле mRemoteNG.
+
+---
+
+## fleet.ps1 (альтернатива без mRemoteNG)
+
 ## fleet.ps1 — one-click RDP ко всему парку
 
 Открывает все VPS парка одной командой, с уже введёнными паролями и

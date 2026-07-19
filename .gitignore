@@ -33,3 +33,5 @@ ls_launch.log
 # operator/ fleet tools — секреты и генерённые артефакты только локально
 operator/hosts.csv
 operator/rdp/
+operator/template.csv
+operator/mremoteng-import.csv
