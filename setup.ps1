@@ -210,7 +210,7 @@ if ($unattended) {
 
 function Set-IniValue {
     param([string]$Path, [string]$Section, [string]$Key, [string]$Value)
-    if (-not (Test-Path $Path)) { Write-Warning "config не найден: $Path"; return $false }
+    if (-not (Test-Path $Path)) { Write-Warning "config not found: $Path"; return $false }
     $lines = Get-Content -Path $Path
     $out = New-Object System.Collections.Generic.List[string]
     $inSection = $false; $done = $false
@@ -226,7 +226,7 @@ function Set-IniValue {
     }
     # UTF-8 без BOM — Python configparser ломается на BOM.
     [System.IO.File]::WriteAllLines($Path, $out, [System.Text.UTF8Encoding]::new($false))
-    if (-not $done) { Write-Warning "не нашёл [$Section] $Key в config.ini — пропуск" }
+    if (-not $done) { Write-Warning "key not found: [$Section] $Key in config.ini -- skipped" }
     return $done
 }
 
@@ -236,7 +236,7 @@ function Get-EnvInt {
     if (-not $v) { return $null }
     $n = 0
     if ([int]::TryParse($v.Trim(), [ref]$n)) { return $n }
-    Write-Warning "env $Name='$v' не целое число — игнорирую"
+    Write-Warning "env $Name='$v' is not an integer -- ignored"
     return $null
 }
 
@@ -246,10 +246,10 @@ $envProfiles = Get-EnvInt 'Profiles_LS'
 if ($null -ne $envProfiles) {
     if ($envProfiles -lt 1) { $envProfiles = 1 }
     if (Set-IniValue $cfgPath 'profiles' 'count' $envProfiles) {
-        Write-Step "profiles count = $envProfiles (из env Profiles_LS)"
+        Write-Step "profiles count = $envProfiles (from env Profiles_LS)"
     }
     if ($envProfiles -gt 5) {
-        Write-Warning ("Profiles_LS={0}: >5 профилей = N*target URL, прогрев может занять много часов (10 профилей x 150-250 = 1500-2500 URL ~ 12-20 ч). Убедись что осознанно." -f $envProfiles)
+        Write-Warning ("Profiles_LS={0}: >5 profiles = N*target URL, warmup may take many hours (10 profiles x 150-250 = 1500-2500 URL ~ 12-20h). Make sure this is intended." -f $envProfiles)
     }
 }
 
@@ -267,7 +267,7 @@ if ($rawUrls) {
         $uMin = [int]$matches[1]; $uMax = [int]$matches[2]
     }
     else {
-        Write-Warning "env URLS_PER_PROFILE='$rawUrls' не число и не диапазон 'N-M' — игнорирую"
+        Write-Warning "env URLS_PER_PROFILE='$rawUrls' is not a number or 'N-M' range -- ignored"
     }
 }
 $eMin = Get-EnvInt 'URLS_MIN'; $eMax = Get-EnvInt 'URLS_MAX'
@@ -282,9 +282,9 @@ if (($null -ne $uMin) -or ($null -ne $uMax)) {
     Set-IniValue $cfgPath 'api' 'urls_total_target_min' $uMin | Out-Null
     Set-IniValue $cfgPath 'api' 'urls_total_target_max' $uMax | Out-Null
     if ($uMin -eq $uMax) {
-        Write-Step "urls per profile = $uMin (фикс, из env)"
+        Write-Step "urls per profile = $uMin (fixed, from env)"
     } else {
-        Write-Step "urls per profile = ${uMin}..${uMax} (диапазон, из env)"
+        Write-Step "urls per profile = ${uMin}..${uMax} (range, from env)"
     }
 }
 
@@ -360,9 +360,9 @@ Write-Host "  [OK] auto-reboot blocked while user is logged in (security patches
 Write-Step "Disabling account lockout policy (anti-lockout after hard reset)"
 $lockoutOut = cmd /c "net accounts /lockoutthreshold:0" 2>&1
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "  [OK] account lockout threshold = 0 (никогда не лочится)" -ForegroundColor Green
+    Write-Host "  [OK] account lockout threshold = 0 (never locks out)" -ForegroundColor Green
 } else {
-    Write-Host "  [WARN] net accounts вернул rc=$LASTEXITCODE :" -ForegroundColor Yellow
+    Write-Host "  [WARN] net accounts returned rc=$LASTEXITCODE :" -ForegroundColor Yellow
     Write-Host "  $lockoutOut" -ForegroundColor Yellow
 }
 
