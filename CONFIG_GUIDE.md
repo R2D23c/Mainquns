@@ -18,15 +18,16 @@
 
 ```powershell
 $env:WARMUP_BRANCH    = "multi-profile"
-$env:Profiles_LS      = '10'    # сколько профилей на VPS
-$env:URLS_PER_PROFILE = '200'   # фикс. цель URL на каждый профиль
-# либо диапазон вместо фикс.:  $env:URLS_MIN='150' ; $env:URLS_MAX='250'
+$env:Profiles_LS      = '10'        # сколько профилей на VPS
+$env:URLS_PER_PROFILE = '150-300'   # цель URL на профиль: число ИЛИ диапазон
 iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
 ```
 
 - `Profiles_LS` → `[profiles] count`
-- `URLS_PER_PROFILE` → `urls_total_target_min` = `max` (ровно это число на профиль)
-- `URLS_MIN`/`URLS_MAX` → случайный диапазон на профиль (как дефолт 150-250)
+- `URLS_PER_PROFILE` → цель URL на каждый профиль:
+  - `'200'` — ровно 200 на профиль (фикс)
+  - `'150-300'` — случайно из диапазона на каждый профиль
+- `URLS_MIN`/`URLS_MAX` → альтернатива диапазону двумя переменными (перекрывают границу, если заданы)
 
 Задал только часть — остальное берётся из `config.ini` по умолчанию. Env читаются **один раз при установке**; на уже установленной машине значения зафиксированы (нужен `freshstart.bat` чтобы переустановить с новыми).
 

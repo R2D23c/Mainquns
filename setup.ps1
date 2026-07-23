@@ -11,9 +11,9 @@
 #   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
 #
 # Multi-profile: сколько профилей и сколько URL/профиль — через env (до старта):
-#   $env:Profiles_LS      = '10'    # профилей на VPS
-#   $env:URLS_PER_PROFILE = '200'   # фикс. цель URL на каждый профиль
-#   (или диапазон: $env:URLS_MIN='150' ; $env:URLS_MAX='250')
+#   $env:Profiles_LS      = '10'       # профилей на VPS
+#   $env:URLS_PER_PROFILE = '200'      # фикс. цель URL на профиль
+#   $env:URLS_PER_PROFILE = '150-300'  # или диапазон (случайно на профиль)
 #
 # What it does:
 #   - check/install Git and Python 3.12 (via winget; falls back to direct
@@ -253,23 +253,39 @@ if ($null -ne $envProfiles) {
     }
 }
 
-$envUrlsExact = Get-EnvInt 'URLS_PER_PROFILE'
-$envUrlsMin = Get-EnvInt 'URLS_MIN'
-$envUrlsMax = Get-EnvInt 'URLS_MAX'
-if ($null -ne $envUrlsExact) {
-    if ($envUrlsExact -lt 1) { $envUrlsExact = 1 }
-    Set-IniValue $cfgPath 'api' 'urls_total_target_min' $envUrlsExact | Out-Null
-    Set-IniValue $cfgPath 'api' 'urls_total_target_max' $envUrlsExact | Out-Null
-    Write-Step "urls per profile = $envUrlsExact (фикс, из env URLS_PER_PROFILE)"
+# URLS_PER_PROFILE понимает и одно число '200' (фикс), и диапазон '150-300'
+# (случайно на профиль). URLS_MIN/URLS_MAX — альтернатива двумя переменными;
+# если заданы, перекрывают соответствующую границу.
+$uMin = $null; $uMax = $null
+$rawUrls = [Environment]::GetEnvironmentVariable('URLS_PER_PROFILE')
+if ($rawUrls) {
+    $rawUrls = $rawUrls.Trim()
+    if ($rawUrls -match '^\d+$') {
+        $uMin = [int]$rawUrls; $uMax = $uMin
+    }
+    elseif ($rawUrls -match '^(\d+)\s*-\s*(\d+)$') {
+        $uMin = [int]$matches[1]; $uMax = [int]$matches[2]
+    }
+    else {
+        Write-Warning "env URLS_PER_PROFILE='$rawUrls' не число и не диапазон 'N-M' — игнорирую"
+    }
 }
-elseif (($null -ne $envUrlsMin) -or ($null -ne $envUrlsMax)) {
-    if ($null -eq $envUrlsMin) { $envUrlsMin = $envUrlsMax }
-    if ($null -eq $envUrlsMax) { $envUrlsMax = $envUrlsMin }
-    if ($envUrlsMin -lt 1) { $envUrlsMin = 1 }
-    if ($envUrlsMin -gt $envUrlsMax) { $t = $envUrlsMin; $envUrlsMin = $envUrlsMax; $envUrlsMax = $t }
-    Set-IniValue $cfgPath 'api' 'urls_total_target_min' $envUrlsMin | Out-Null
-    Set-IniValue $cfgPath 'api' 'urls_total_target_max' $envUrlsMax | Out-Null
-    Write-Step "urls per profile = $envUrlsMin..$envUrlsMax (из env URLS_MIN/URLS_MAX)"
+$eMin = Get-EnvInt 'URLS_MIN'; $eMax = Get-EnvInt 'URLS_MAX'
+if ($null -ne $eMin) { $uMin = $eMin }
+if ($null -ne $eMax) { $uMax = $eMax }
+if (($null -ne $uMin) -or ($null -ne $uMax)) {
+    if ($null -eq $uMin) { $uMin = $uMax }
+    if ($null -eq $uMax) { $uMax = $uMin }
+    if ($uMin -lt 1) { $uMin = 1 }
+    if ($uMax -lt 1) { $uMax = 1 }
+    if ($uMin -gt $uMax) { $t = $uMin; $uMin = $uMax; $uMax = $t }
+    Set-IniValue $cfgPath 'api' 'urls_total_target_min' $uMin | Out-Null
+    Set-IniValue $cfgPath 'api' 'urls_total_target_max' $uMax | Out-Null
+    if ($uMin -eq $uMax) {
+        Write-Step "urls per profile = $uMin (фикс, из env)"
+    } else {
+        Write-Step "urls per profile = $uMin..$uMax (диапазон, из env)"
+    }
 }
 
 # 4. install.bat - Python deps + Linken Sphere + opens credentials.ini
