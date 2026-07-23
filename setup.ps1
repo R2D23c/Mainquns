@@ -10,6 +10,11 @@
 #   $env:WARMUP_BRANCH = "multi-profile"
 #   iwr -useb https://raw.githubusercontent.com/r2d23c/mainquns/multi-profile/setup.ps1 | iex
 #
+# Multi-profile: сколько профилей и сколько URL/профиль — через env (до старта):
+#   $env:Profiles_LS      = '10'    # профилей на VPS
+#   $env:URLS_PER_PROFILE = '200'   # фикс. цель URL на каждый профиль
+#   (или диапазон: $env:URLS_MIN='150' ; $env:URLS_MAX='250')
+#
 # What it does:
 #   - check/install Git and Python 3.12 (via winget; falls back to direct
 #     installer downloads from github/python.org if winget unavailable on VPS)
@@ -191,6 +196,80 @@ if ($unattended) {
     # UTF-8 БЕЗ BOM — Python configparser плохо реагирует на BOM в первой строке.
     [System.IO.File]::WriteAllText($credPath, $iniContent, [System.Text.UTF8Encoding]::new($false))
     Write-Step "credentials.ini written from env vars (Notepad step skipped)"
+}
+
+# 3.6 Install-time overrides из env -> config.ini (ветка multi-profile).
+# Оператор регулирует ДО первого запуска, файлы руками не правит:
+#   $env:Profiles_LS       — сколько профилей греть на этой VPS ([profiles] count)
+#   $env:URLS_PER_PROFILE  — фикс. цель URL на профиль (min=max=это число)
+#   $env:URLS_MIN / URLS_MAX — вместо фикс.: случайный диапазон на профиль
+# Значения пишутся в config.ini и фиксируются в state-файлах при первом
+# запуске warmup.py. На УЖЕ установленной машине менять бесполезно (профили
+# и target'ы зафиксированы) — нужен freshstart.bat. Код Python не трогаем:
+# он и так читает [profiles] count и urls_total_target_min/max.
+
+function Set-IniValue {
+    param([string]$Path, [string]$Section, [string]$Key, [string]$Value)
+    if (-not (Test-Path $Path)) { Write-Warning "config не найден: $Path"; return $false }
+    $lines = Get-Content -Path $Path
+    $out = New-Object System.Collections.Generic.List[string]
+    $inSection = $false; $done = $false
+    foreach ($line in $lines) {
+        if ($line -match '^\s*\[(.+)\]\s*$') {
+            $inSection = ($matches[1] -eq $Section)
+        }
+        elseif ($inSection -and -not $done -and
+                $line -match "^\s*$([regex]::Escape($Key))\s*=") {
+            $line = "$Key = $Value"; $done = $true
+        }
+        $out.Add($line)
+    }
+    # UTF-8 без BOM — Python configparser ломается на BOM.
+    [System.IO.File]::WriteAllLines($Path, $out, [System.Text.UTF8Encoding]::new($false))
+    if (-not $done) { Write-Warning "не нашёл [$Section] $Key в config.ini — пропуск" }
+    return $done
+}
+
+function Get-EnvInt {
+    param([string]$Name)
+    $v = [Environment]::GetEnvironmentVariable($Name)
+    if (-not $v) { return $null }
+    $n = 0
+    if ([int]::TryParse($v.Trim(), [ref]$n)) { return $n }
+    Write-Warning "env $Name='$v' не целое число — игнорирую"
+    return $null
+}
+
+$cfgPath = Join-Path $repoDir "config.ini"
+
+$envProfiles = Get-EnvInt 'Profiles_LS'
+if ($null -ne $envProfiles) {
+    if ($envProfiles -lt 1) { $envProfiles = 1 }
+    if (Set-IniValue $cfgPath 'profiles' 'count' $envProfiles) {
+        Write-Step "profiles count = $envProfiles (из env Profiles_LS)"
+    }
+    if ($envProfiles -gt 5) {
+        Write-Warning "Profiles_LS=$envProfiles: >5 профилей = N*target URL, прогрев может занять много часов (10 профилей x 150-250 = 1500-2500 URL ~ 12-20 ч). Убедись что осознанно."
+    }
+}
+
+$envUrlsExact = Get-EnvInt 'URLS_PER_PROFILE'
+$envUrlsMin = Get-EnvInt 'URLS_MIN'
+$envUrlsMax = Get-EnvInt 'URLS_MAX'
+if ($null -ne $envUrlsExact) {
+    if ($envUrlsExact -lt 1) { $envUrlsExact = 1 }
+    Set-IniValue $cfgPath 'api' 'urls_total_target_min' $envUrlsExact | Out-Null
+    Set-IniValue $cfgPath 'api' 'urls_total_target_max' $envUrlsExact | Out-Null
+    Write-Step "urls per profile = $envUrlsExact (фикс, из env URLS_PER_PROFILE)"
+}
+elseif (($null -ne $envUrlsMin) -or ($null -ne $envUrlsMax)) {
+    if ($null -eq $envUrlsMin) { $envUrlsMin = $envUrlsMax }
+    if ($null -eq $envUrlsMax) { $envUrlsMax = $envUrlsMin }
+    if ($envUrlsMin -lt 1) { $envUrlsMin = 1 }
+    if ($envUrlsMin -gt $envUrlsMax) { $t = $envUrlsMin; $envUrlsMin = $envUrlsMax; $envUrlsMax = $t }
+    Set-IniValue $cfgPath 'api' 'urls_total_target_min' $envUrlsMin | Out-Null
+    Set-IniValue $cfgPath 'api' 'urls_total_target_max' $envUrlsMax | Out-Null
+    Write-Step "urls per profile = $envUrlsMin..$envUrlsMax (из env URLS_MIN/URLS_MAX)"
 }
 
 # 4. install.bat - Python deps + Linken Sphere + opens credentials.ini
