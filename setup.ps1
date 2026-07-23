@@ -249,7 +249,7 @@ if ($null -ne $envProfiles) {
         Write-Step "profiles count = $envProfiles (из env Profiles_LS)"
     }
     if ($envProfiles -gt 5) {
-        Write-Warning "Profiles_LS=$envProfiles: >5 профилей = N*target URL, прогрев может занять много часов (10 профилей x 150-250 = 1500-2500 URL ~ 12-20 ч). Убедись что осознанно."
+        Write-Warning ("Profiles_LS={0}: >5 профилей = N*target URL, прогрев может занять много часов (10 профилей x 150-250 = 1500-2500 URL ~ 12-20 ч). Убедись что осознанно." -f $envProfiles)
     }
 }
 
@@ -284,7 +284,7 @@ if (($null -ne $uMin) -or ($null -ne $uMax)) {
     if ($uMin -eq $uMax) {
         Write-Step "urls per profile = $uMin (фикс, из env)"
     } else {
-        Write-Step "urls per profile = $uMin..$uMax (диапазон, из env)"
+        Write-Step "urls per profile = ${uMin}..${uMax} (диапазон, из env)"
     }
 }
 
