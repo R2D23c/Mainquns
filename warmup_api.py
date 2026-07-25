@@ -423,6 +423,21 @@ def _ntfy_header() -> str:
 _LS_RECOVERY_MAX_PER_CHUNK = 2  # больше двух раз на чанк не пытаемся,
                                 # значит что-то системное, эскалация
 
+# Ретрай поиска сессии в GET /sessions. LS-cloud отдаёт каталог НЕ атомарно:
+# сессия может на секунды-минуты пропасть из списка, оставаясь живой (25.07.2026,
+# 5-профильная машина .176: GUI показывает CL-11045013 в статусе warmup, а
+# /sessions её не возвращает → цикл падал ⚠️ high, хотя через ~час всё шло само).
+#
+# Это был ЕДИНСТВЕННЫЙ шаг цикла без ретрая: ping (5 попыток), 409 (9-step
+# pyramid), connection refused (Layer 4) — обвешаны, а lookup падал с первой
+# промашки. Плюс цепочка сократила паузу между циклами с ~8 мин до 90с, так
+# что запаса на «LS ещё дописывает состояние» не осталось.
+#
+# Расписание — в духе _POST_IMPORT_POLL_SCHEDULE из warmup.py (тот же класс
+# проблемы: ждём пока cloud sync догонит). 5 попыток, ~220с суммарно —
+# укладывается в бюджет цикла, 45-мин tick не задевает.
+_SESSION_LOOKUP_BACKOFFS = [10, 30, 60, 120]
+
 
 def _is_ls_api_dead(err: Exception) -> bool:
     """True если ошибка свидетельствует о смерти/зависании LS API локально
@@ -1351,21 +1366,49 @@ def _run_cycle() -> int:
 
         imported_map = load_session_imported_flag()
 
-        def _resolve_uuid(profile: str) -> str:
+        def _resolve_uuid(profile: str, *, retry: bool = True) -> str:
             """uuid профиля: сперва из .session_imported (если там формат
             с uuid), иначе поиск по имени в /sessions. Коллизия имён на
-            общем LS-аккаунте → ApiError (safety-net как раньше)."""
-            stored = imported_map.get(profile)
-            if stored:
-                log.info("uuid профиля %s из .session_imported: %s", profile, stored)
-                client.find_session_by_uuid(stored)  # валидация что жива
-                return stored
-            log.info("ищу сессию по имени %r (uuid в .session_imported не записан)", profile)
-            s = client.find_session_by_name(profile)
-            u = s.get("uuid")
-            if not u:
-                raise ApiError(f"в сессии {profile!r} нет uuid: {s}")
-            return u
+            общем LS-аккаунте → ApiError сразу (safety-net как раньше).
+
+            Ретрай по _SESSION_LOOKUP_BACKOFFS: LS-cloud отдаёт каталог
+            не атомарно, сессия может временно пропасть из GET /sessions.
+            retry=False — для best-effort вызовов (догон export'ов), чтобы
+            не тратить минуты на профиль, которым займётся следующий цикл."""
+            backoffs = _SESSION_LOOKUP_BACKOFFS if retry else []
+            last_err: Exception | None = None
+            for attempt in range(len(backoffs) + 1):
+                try:
+                    stored = imported_map.get(profile)
+                    if stored:
+                        log.info("uuid профиля %s из .session_imported: %s", profile, stored)
+                        client.find_session_by_uuid(stored)  # валидация что жива
+                        return stored
+                    log.info("ищу сессию по имени %r (uuid в .session_imported не записан)",
+                             profile)
+                    s = client.find_session_by_name(profile)
+                    u = s.get("uuid")
+                    if not u:
+                        raise ApiError(f"в сессии {profile!r} нет uuid: {s}")
+                    if attempt:
+                        log.info("сессия %s нашлась с %d-й попытки (cloud sync доехал)",
+                                 profile, attempt + 1)
+                    return u
+                except ApiError as e:
+                    # Коллизия имён — ретрай не поможет, нужен оператор
+                    # (удалить дубль в LS). Падаем сразу, как раньше.
+                    if "коллизия" in str(e):
+                        raise
+                    last_err = e
+                    if attempt < len(backoffs):
+                        b = backoffs[attempt]
+                        log.warning(
+                            "сессия %s не видна в /sessions (%s) — LS-cloud ещё "
+                            "не синхронизировал? backoff %dс, попытка %d/%d",
+                            profile, e, b, attempt + 2, len(backoffs) + 1,
+                        )
+                        time.sleep(b)
+            raise last_err  # type: ignore[misc]
 
         # Догоняем незакрытые export'ы: профиль мог достичь target'а на
         # прошлом tick'е, а export cookies упасть (409 от LS / timeout).
@@ -1378,7 +1421,9 @@ def _run_cycle() -> int:
                 continue
             log.info("профиль %s завершён, но cookies не экспортированы — ретрай", done_name)
             try:
-                _u = _resolve_uuid(done_name)
+                # retry=False: это best-effort догон, ждать здесь минуты
+                # незачем — следующий цикл попробует снова.
+                _u = _resolve_uuid(done_name, retry=False)
                 _n_cookies = count_session_cookies(client, _u, pre_wait_seconds=10)
                 if _n_cookies is not None:
                     _exported_flag_for(done_name).write_text("1", encoding="utf-8")
