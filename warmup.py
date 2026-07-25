@@ -1670,11 +1670,25 @@ def load_session_names(count: int) -> list[str]:
         if names:
             return names
     if SESSION_IMPORTED_FLAG.exists():
-        legacy = SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").strip()
-        if legacy and "\t" not in legacy and "\n" not in legacy:
-            log.info("миграция: имя сессии %r из .session_imported → .session_name", legacy)
-            SESSION_NAME_FILE.write_text(legacy, encoding="utf-8")
-            return [legacy]
+        # Восстановление .session_name из флага импорта. КРИТИЧНО: если тут
+        # не восстановить, ниже сгенерятся НОВЫЕ имена → import_session_if_needed
+        # увидит расхождение с флагом → переимпортирует → в LS появятся ДУБЛИ
+        # сессий (а старые останутся греться впустую). Поэтому разбираем ВСЕ
+        # строки и оба формата: «<имя>» и «<uuid>\t<имя>».
+        legacy_names: list[str] = []
+        for ln in SESSION_IMPORTED_FLAG.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            _, _, nm = ln.partition("\t")
+            nm = (nm or ln).strip()
+            if nm:
+                legacy_names.append(nm)
+        if legacy_names:
+            log.info("миграция: %d имя(ён) из .session_imported → .session_name: %s",
+                     len(legacy_names), ", ".join(legacy_names))
+            SESSION_NAME_FILE.write_text("\n".join(legacy_names) + "\n", encoding="utf-8")
+            return legacy_names
     try:
         creds = load_credentials()
         if creds.has_section("session"):
