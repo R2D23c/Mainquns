@@ -2004,12 +2004,27 @@ def import_session_if_needed(cfg: configparser.ConfigParser, session_names: list
     # 16.06.2026 — preview появлялся через 5+ мин, к тому моменту
     # warmup.py уже отрапортовал ⚠️ и оператор делал manual recovery).
     #
-    # 600с (10 мин) даёт LS pre-import sync завершиться. На fast VPS
-    # IMPORT кнопка matchится мгновенно — wait_for выходит сразу,
-    # никакой задержки. На slow VPS — терпеливо ждём.
+    # 600с (10 мин) даёт LS pre-import sync завершиться на ОДНОЙ строке.
+    #
+    # Мульти-профиль: sync валидирует fingerprint КАЖДОЙ строки xlsx с
+    # ls.app, поэтому время растёт с числом профилей. 25.07.2026 на
+    # 2 профилях наблюдалось 6 минут — то есть 600с уже был на грани, а
+    # на 5-10 профилях гарантированно упёрся бы в timeout (⚠️ + ручной
+    # IMPORT оператором, хотя LS работает штатно, просто медленно).
+    # Поэтому +240с на каждый профиль сверх первого, потолок 40 мин.
+    #
+    # На fast VPS ничего не теряем: wait_for выходит в момент появления
+    # кнопки, таймаут — только верхняя граница ожидания.
+    # Одиночный профиль: 600с ровно как раньше (совместимость с main).
+    #
+    # Тайминги не конфликтуют: UI install и так может идти >45 мин, а
+    # Task Scheduler с MultipleInstances=IgnoreNew просто пропустит тик;
+    # watchdog при main task Running не вмешивается (early-exit в main()).
     conf = cfg.getfloat("matching", "confidence")
-    log.info("жду IMPORT кнопку (до 10 мин — LS делает pre-import cloud sync xlsx fingerprint'а)…")
-    ib_x, ib_y = wait_for("import_button", conf, 600.0)
+    import_timeout = min(600.0 + 240.0 * (len(session_names) - 1), 2400.0)
+    log.info("жду IMPORT кнопку (до %.0f мин — LS делает pre-import cloud sync "
+             "fingerprint'ов %d профиля(ей))…", import_timeout / 60, len(session_names))
+    ib_x, ib_y = wait_for("import_button", conf, import_timeout)
     log.info("click import_button@(%d,%d)", ib_x, ib_y)
     _record_click(ib_x, ib_y, "import_button")
     pyautogui.click(ib_x, ib_y)

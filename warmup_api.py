@@ -1156,10 +1156,14 @@ _mutex_handle = None  # держим ссылку до конца жизни п�
 # не молотит непрерывно. Плюс анти-collision jitter 0-120с в начале
 # каждого цикла остаётся — суммарная пауза между циклами 1.5-3.5 мин.
 _CHAIN_REST_SECONDS = 90
-# Предохранитель от бесконечной цепочки при любом непредвиденном багe
-# счётчиков: 750 URL worst-case (5 профилей × 150) / ~95 URL за цикл ≈ 8
-# циклов; 30 — с запасом x3.
-_CHAIN_MAX_CYCLES = 30
+# Предохранитель от бесконечной цепочки при любом непредвиденном баге
+# счётчиков. Считаем worst-case по верхней границе парка: 10 профилей ×
+# 300 URL = 3000 URL / ~95 URL за цикл ≈ 32 цикла. 30 упиралось бы в
+# потолок ровно на большой конфигурации (цепочка вышла бы, дальше по
+# 45-мин сетке — не смертельно, но медленнее ровно на финише). 60 даёт
+# ~2x запас и остаётся честным backstop'ом: реальный runaway (счётчики
+# не растут) всё равно упрётся.
+_CHAIN_MAX_CYCLES = 60
 
 
 def _acquire_single_instance() -> bool:
@@ -1296,21 +1300,25 @@ def _run_cycle() -> int:
             )
             return 2
 
-        # Выбор активного профиля на этот tick: наименее прогретый
-        # (по доле от target) из незавершённых. Ротация получается сама:
-        # тик прогревает отстающего, на следующем тике отстаёт другой.
-        # Прогрев СТРОГО последовательный — один профиль за tick: LS API
-        # держит глобальный лок на аккаунт (см. 9-step pyramid), два
-        # параллельных warmup'а с одной машины устроили бы self-409-шторм.
-        active = min(unfinished, key=lambda n: counts[n] / max(1, targets[n]))
-        session_name = active  # для error-handler'а и legacy-хинтов
-        target = targets[active]
-        current = counts[active]
+        # Очередь профилей на этот цикл: наименее прогретый (по доле от
+        # target) первым. Ротация получается сама: цикл греет отстающего,
+        # на следующем отстаёт другой. Прогрев СТРОГО последовательный —
+        # один профиль за цикл: LS API держит глобальный лок на аккаунт
+        # (см. 9-step pyramid), два параллельных warmup'а с одной машины
+        # устроили бы self-409-шторм.
+        #
+        # Список, а не один min(): если сессия первого кандидата не
+        # резолвится (удалена оператором, коллизия имён, LS-cloud её
+        # потерял), берём следующего. Иначе одна мёртвая сессия навсегда
+        # блокировала бы машину — её счётчик остаётся 0, ratio 0, значит
+        # её выбирало бы КАЖДЫЙ цикл, и остальные профили не прогрелись
+        # бы никогда.
+        candidates = sorted(unfinished, key=lambda n: counts[n] / max(1, targets[n]))
+        active = candidates[0]  # предварительно — для error-handler'а
+        session_name = active   # для error-handler'а и legacy-хинтов
         if not single:
-            log.info("активный профиль этого tick'а: %s (%d/%d незавершённых)",
-                     active, len(unfinished), len(profile_names))
-        log.info("прогресс %s: %d/%d URL (осталось ~%d)",
-                 active, current, target, max(0, target - current))
+            log.info("очередь профилей этого цикла: %s (%d из %d незавершены)",
+                     ", ".join(candidates), len(unfinished), len(profile_names))
 
         base_url = cfg.get("api", "base_url", fallback="http://127.0.0.1:36555")
         http_timeout = cfg.getfloat("api", "http_timeout_seconds", fallback=15.0)
@@ -1439,8 +1447,50 @@ def _run_cycle() -> int:
                 log.warning("ретрай export'а %s не прошёл: %s — следующий tick попробует",
                             done_name, e)
 
-        uuid = _resolve_uuid(active)
+        # Резолвим по очереди: первый кандидат — с полным ретраем
+        # (типовой случай — LS-cloud временно не отдаёт сессию, см.
+        # _SESSION_LOOKUP_BACKOFFS). Остальные — fail-fast: если первый
+        # реально мёртв, нет смысла тратить по 220с на каждого, надо
+        # просто взять живого и работать.
+        uuid = None
+        skipped: list[str] = []
+        last_lookup_err: Exception | None = None
+        for idx, cand in enumerate(candidates):
+            try:
+                uuid = _resolve_uuid(cand, retry=(idx == 0))
+                active = cand
+                break
+            except ApiError as e:
+                skipped.append(cand)
+                last_lookup_err = e
+                log.warning("профиль %s не резолвится (%s) — пробую следующего "
+                            "из очереди", cand, e)
+        if uuid is None:
+            # Текст последней ошибки прикладываем ДОСЛОВНО: по её подстрокам
+            # error-handler отличает «LS API умерла» (GET /sessions + 10061/
+            # refused/таймаут → отдельный понятный push) от «сессии реально
+            # нет». Без неё всё падало бы в generic ⚠️.
+            raise ApiError(
+                f"ни один из {len(candidates)} незавершённых профилей не найден "
+                f"в /sessions: {', '.join(candidates)} — последняя ошибка: "
+                f"{last_lookup_err}"
+            )
+        # Пропуск не должен быть молчаливым: оператор увидит его в обычном
+        # ⚙️ push'е цикла (priority low — машина работает, паниковать не о
+        # чем, но знать надо: сессию могли удалить руками).
+        skipped_note = ""
+        if skipped:
+            log.warning("пропущены нерезолвящиеся профили: %s — работаю с %s",
+                        ", ".join(skipped), active)
+            skipped_note = (f"\nне резолвятся в /sessions: {', '.join(skipped)} "
+                            f"(пропущены, проверь их в LS GUI)")
+
+        session_name = active  # финальный выбор — для error-handler'а
+        target = targets[active]
+        current = counts[active]
         log.info("используем uuid=%s (профиль %s)", uuid, active)
+        log.info("прогресс %s: %d/%d URL (осталось ~%d)",
+                 active, current, target, max(0, target - current))
 
         pool = load_url_pool(cfg)
         # remaining > 0 гарантировано: выше был return 0 при current >= target
@@ -1692,7 +1742,7 @@ def _run_cycle() -> int:
                 + _progress_lines() + "\n"
                 f"total: {sum(counts.values())}/{sum(targets.values())} URL "
                 f"({100*sum(counts.values())//max(1, sum(targets.values()))}%)\n"
-                f"elapsed: {elapsed/60:.0f} мин",
+                f"elapsed: {elapsed/60:.0f} мин" + skipped_note,
                 title="warmup cycle",
                 priority="low",
                 tags="gear",
